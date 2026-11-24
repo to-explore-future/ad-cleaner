@@ -120,6 +120,16 @@ Adblock Plus / uBlock 的元素选择器有个硬伤：**浏览器的命中测�
 
 `chrome.storage.local['settings']` = `{ showEffect: boolean }`。
 
+## Git 工作流
+
+**仓库已初始化（2026-11），分支 `master`。**
+
+- 每次版本号 +1 之后**提交一次**，message 写清这版做了什么
+- 不 push、不加远端（除非用户明确要求）
+- 探索性的改动如果被退回，**开个 `wip/xxx` 分支留档**，别直接删：
+  `git checkout -b wip/xxx` → 提交 → `git checkout master`
+- `.gitignore` 里已经排除 `node_modules/ .output/ .wxt/ .dev-profile/ .chrome-profile/ *.zip`
+
 ## 两条命令
 
 ```bash

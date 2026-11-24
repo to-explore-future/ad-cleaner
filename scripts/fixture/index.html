@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>广告清道夫 · 测试页</title>
+<style>
+  html, body { margin: 0; padding: 0; font-family: sans-serif; background: #fff; }
+  #content { padding: 16px; }
+
+  /* 模仿真实广告：外层容器里套了好几层 */
+  .ad-box {
+    position: absolute; left: 100px; top: 100px;
+    width: 300px; height: 200px; background: #fffbe6;
+    border: 1px solid #ffe58f; box-sizing: border-box;
+  }
+  .ad-wrap { width: 100%; height: 100%; padding: 10px; box-sizing: border-box; }
+  .ad-inner { width: 260px; height: 80px; background: #fff1f0; }
+  .ad-img { display: block; width: 260px; height: 80px; }
+
+  /* 同款元素 ×3 —— 用来测「命中 N 处」 */
+  .dup {
+    position: absolute; width: 80px; height: 40px;
+    background: #e6fffb; border: 1px solid #87e8de;
+  }
+  /* 信息流：同款卡片 + 广告角标 */
+  .feed {
+    position: absolute; left: 100px; top: 460px; width: 620px;
+    display: flex; flex-wrap: wrap; gap: 10px;
+  }
+  .feed-item {
+    width: 190px; height: 120px;
+    background: #f6ffed; border: 1px solid #b7eb8f;
+    border-radius: 6px; padding: 8px; box-sizing: border-box;
+    position: relative;
+  }
+  .feed-cover { height: 60px; background: #d9f7be; }
+  .feed-title { font-size: 12px; margin-top: 6px; color: #555; }
+  .feed-badge {
+    position: absolute; right: 6px; bottom: 6px;
+    background: #faad14; color: #fff;
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  }
+
+  .dup.a { left: 500px; top: 100px; }
+  .dup.b { left: 500px; top: 160px; }
+  .dup.c { left: 500px; top: 220px; }
+</style>
+</head>
+<body>
+  <div id="content">
+    <h1 id="title">测试页面</h1>
+    <p id="keep">这段正文不能被误伤。</p>
+  </div>
+
+  <div class="ad-box">
+    <div class="ad-wrap">
+      <div class="ad-inner">
+        <img class="ad-img" alt="ad" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='80'><rect width='260' height='80' fill='%23ffccc7'/><text x='10' y='45' font-size='18'>AD</text></svg>">
+      </div>
+    </div>
+  </div>
+
+  <div class="dup a">同款 1</div>
+  <div class="dup b">同款 2</div>
+  <div class="dup c">同款 3</div>
+
+  <!-- 模拟信息流：同类卡片里混着广告（用来验"点一下广告自动推断"） -->
+  <div class="feed" id="feed">
+    <div class="feed-item"><div class="feed-cover">普通 1</div><div class="feed-title">普通内容一</div></div>
+    <div class="feed-item"><div class="feed-cover">普通 2</div><div class="feed-title">普通内容二</div></div>
+    <div class="feed-item is-ad"><div class="feed-cover">广告 3</div><div class="feed-title">广告内容三</div><span class="feed-badge">广告</span></div>
+    <div class="feed-item"><div class="feed-cover">普通 4</div><div class="feed-title">普通内容四</div></div>
+    <div class="feed-item is-ad"><div class="feed-cover">广告 5</div><div class="feed-title">广告内容五</div><span class="feed-badge">广告</span></div>
+    <div class="feed-item"><div class="feed-cover">普通 6</div><div class="feed-title">普通内容六</div></div>
+  </div>
+</body>
+</html>

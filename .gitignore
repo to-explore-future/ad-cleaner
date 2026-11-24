@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+.output/
+.wxt/
+stats.html
+
+# 本地环境（含登录态，绝不入库）
+.dev-profile/
+.chrome-profile/
+.dev-profile*/
+*.zip
+
+# 临时
+*.log
+.DS_Store

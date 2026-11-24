@@ -1,0 +1,31 @@
+{
+  "name": "ad-cleaner",
+  "description": "广告清道夫 —— 像 F12 一样在页面上点选要拦的东西，还能沿着 DOM 树往外扩一层。",
+  "private": true,
+  "version": "0.0.2",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "vue-tsc --noEmit",
+    "postinstall": "wxt prepare",
+    "verify": "node scripts/verify.cjs",
+    "verify:real": "node scripts/server.cjs & sleep 1 && node scripts/verify-real.cjs",
+    "probe:reload": "node scripts/probe-reload.cjs",
+    "probe:errors": "node scripts/probe-errors.cjs",
+    "probe:lock": "node scripts/probe-lock.cjs",
+    "probe:broad": "node scripts/probe-broad.cjs",
+    "probe:smart": "node scripts/probe-smart-bili.cjs"
+  },
+  "dependencies": {
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.27",
+    "@wxt-dev/module-vue": "^1.0.2",
+    "typescript": "5.6.3",
+    "vue-tsc": "^2.2.10",
+    "wxt": "^0.20.6"
+  }
+}

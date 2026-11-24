@@ -111,13 +111,16 @@ Adblock Plus / uBlock 的元素选择器有个硬伤：**浏览器的命中测�
 
 ## Git 工作流
 
-**仓库已初始化（2026-11），分支 `master`。**
+**仓库：https://github.com/to-explore-future/ad-cleaner（public），分支 `main`。**
 
 - 每次版本号 +1 之后**提交一次**，message 写清这版做了什么
 - 不 push、不加远端（除非用户明确要求）
 - 探索性的改动如果被退回，**开个 `wip/xxx` 分支留档**，别直接删：
   `git checkout -b wip/xxx` → 提交 → `git checkout master`
 - `.gitignore` 里已经排除 `node_modules/ .output/ .wxt/ .dev-profile/ .chrome-profile/ *.zip`
+- ⚠️ **这台机器上推 GitHub 必须走代理**（已在本仓库 local config 里配好，不影响别的仓库）：
+  `git config http.proxy http://127.0.0.1:7897`，否则报
+  `Failed to connect to github.com port 443` 或 `HTTP2 framing layer`
 
 ## 两条命令
 

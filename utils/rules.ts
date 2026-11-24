@@ -78,8 +78,7 @@ export async function saveSettings(s: Settings): Promise<void> {
  */
 export function buildHideCss(rules: BlockRule[], excludeSelector?: string): string {
     const sels = rules
-        // 带条件的规则 CSS 表达不了（CSS 没有"包含文字"），交给 JS 处理
-        .filter((r) => r.enabled && r.action === 'hide' && !r.condition)
+        .filter((r) => r.enabled && r.action === 'hide')
         .map((r) => r.selector)
         .filter((s) => s && s !== excludeSelector);
     if (sels.length === 0) return '';
@@ -164,22 +163,4 @@ export async function importRules(text: string): Promise<{ added: number; update
 
     await chrome.storage.local.set({ [RULES_KEY]: all });
     return { added, updated, domains: Object.keys(parsed.rules).length };
-}
-
-/** 把一条规则转成一行可读语法（给用户看 / 方便以后分享）。 */
-export function ruleToSyntax(rule: BlockRule): string {
-    const base = `${rule.domain}##${rule.selector}`;
-    if (!rule.condition) return base;
-    return rule.condition.type === 'text'
-        ? `${rule.selector}|text("${rule.condition.value}")`
-        : `${rule.selector}:has(${rule.condition.value})`;
-}
-
-/** 规则的一句话描述，列表里显示用。 */
-export function ruleToLabel(rule: BlockRule): string {
-    if (!rule.condition) return rule.label || rule.selector;
-    const what = rule.condition.type === 'text'
-        ? `含「${rule.condition.value}」`
-        : `含 ${rule.condition.value}`;
-    return `${rule.label || rule.selector} ${what}`;
 }

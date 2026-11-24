@@ -203,7 +203,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
         /127\.0\.0\.1/.test(await ev(panel, 'document.body.innerText')));
 
     // ═══════════ ② 进入选择模式 ═══════════
-    await clickPanel(panel, '.smart-manual');
+    await clickPanel(panel, '.primary');
     await sleep(1500);
     check('② 点按钮后进入选择模式',
         /选择模式/.test(await ev(panel, 'document.body.innerText')));

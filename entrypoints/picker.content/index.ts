@@ -1,6 +1,6 @@
 import { buildHideCss, loadRulesFor, loadSettings } from '@/utils/rules';
 import { ancestorChain, buildBroadSelector, buildSelector, countMatches, describeElement } from '@/utils/selector';
-import type { BlockRule, ElementInfo, RuleCondition, Settings, SmartCandidate, SmartInference } from '@/utils/types';
+import type { BlockRule, ElementInfo, Settings } from '@/utils/types';
 
 /**
  * 页面侧的「选择器 + 规则执行器」。
@@ -29,8 +29,6 @@ function ctxAlive(): boolean {
 }
 
 const STYLE_ID = '__adc_style';
-/** 条件规则命中后打的类（CSS 里 display:none） */
-const BLOCKED_CLASS = '__adc_blocked';
 const OUTLINE_CLASS = '__adc_outline';
 
 let rules: BlockRule[] = [];
@@ -39,8 +37,6 @@ let styleEl: HTMLStyleElement | null = null;
 
 /** 选择模式状态 */
 let picking = false;
-/** 「点一下广告」智能模式：点中元素后自动推断规则，而不是锁定它 */
-let smartMode = false;
 /**
  * 是否已「锁定」当前选择。
  *
@@ -93,52 +89,7 @@ function rewriteStyle(): void {
         `background:rgba(245,63,63,.10) !important;}\n` +
         /** 同类元素：淡一点的虚线，和"当前这一个"区分开 */
         `.__adc_match.__adc_match{outline:2px dashed rgba(0,174,236,.85) !important;outline-offset:-2px !important;` +
-        `background:rgba(0,174,236,.07) !important;}\n` +
-        `\n.${BLOCKED_CLASS}.${BLOCKED_CLASS}{display:none !important}\n`;
-}
-
-/** 元素是否满足条件。 */
-function meetsCondition(el: Element, c: RuleCondition): boolean {
-    if (c.type === 'text') {
-        const txt = (el as HTMLElement).innerText ?? el.textContent ?? '';
-        return txt.includes(c.value);
-    }
-    try {
-        return !!el.querySelector(c.value);
-    } catch {
-        return false;
-    }
-}
-
-/**
- * 执行「带条件」的规则。
- *
- * ⚠️ 为什么这部分不能靠 CSS：
- *    CSS 没法表达"这个元素内部包含「广告」两个字"。
- *    所以只能 JS 逐个判断，命中的打上 `__adc_blocked` 类（样式里 display:none）。
- */
-function applyConditionalRules(): void {
-    const list = rules.filter((r) => r.enabled && r.condition);
-    // 先清掉上一次打的标记（条件可能变了）
-    document.querySelectorAll(`.${BLOCKED_CLASS}`).forEach((el) => el.classList.remove(BLOCKED_CLASS));
-    if (list.length === 0) return;
-
-    for (const r of list) {
-        let targets: Element[] = [];
-        try {
-            targets = Array.from(document.querySelectorAll(r.selector));
-        } catch {
-            continue;
-        }
-        for (const el of targets) {
-            if (!meetsCondition(el, r.condition!)) continue;
-            if (r.action === 'remove') {
-                el.remove();
-            } else {
-                el.classList.add(BLOCKED_CLASS);
-            }
-        }
-    }
+        `background:rgba(0,174,236,.07) !important;}\n`;
 }
 
 /** 执行「删除」类规则（这些没法用 CSS 做，只能真删）。 */
@@ -155,7 +106,6 @@ function applyRemovals(): void {
 function applyAll(): void {
     rewriteStyle();
     applyRemovals();
-    applyConditionalRules();
 }
 
 /** 页面是单页应用，节点会不断重挂 —— 用观察器兜住「删除」类规则。 */
@@ -164,15 +114,13 @@ let removeTimer: number | null = null;
 
 function watchRemovals(): void {
     if (removeObserver) return;
-    const hasRemoveRule = () =>
-        rules.some((r) => r.enabled && (r.action === 'remove' || !!r.condition));
+    const hasRemoveRule = () => rules.some((r) => r.enabled && r.action === 'remove');
     removeObserver = new MutationObserver(() => {
         if (!hasRemoveRule()) return;
         if (removeTimer != null) return;
         removeTimer = window.setTimeout(() => {
             removeTimer = null;
             applyRemovals();
-            applyConditionalRules();
         }, 200);
     });
     const start = () => {
@@ -401,15 +349,6 @@ function selectAncestor(index: number): void {
     notifyPanel();
 }
 
-function startSmart(): void {
-    startPicker();
-    smartMode = true;
-    if (banner) {
-        banner.hidden = false;
-        banner.textContent = '点一下那个广告（图片、标题、角标都行）';
-    }
-}
-
 function startPicker(): void {
     if (picking) return;
     picking = true;
@@ -445,7 +384,6 @@ function updateBanner(): void {
 function stopPicker(): void {
     if (!picking) return;
     picking = false;
-    smartMode = false;
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('click', onClick, true);
@@ -484,8 +422,7 @@ function onMove(e: MouseEvent): void {
     if (locked) return;
 
     paint(el);
-    // 智能模式：只画框，不标同类（用户还没点，标了反而乱）
-    if (!smartMode) showMatches(buildBroadSelector(el));
+    showMatches(buildBroadSelector(el));
 
     // 还没锁定 → 右侧树跟着鼠标走（F12 的实时对应）
     chain = ancestorChain(el);
@@ -527,26 +464,6 @@ function onClick(e: MouseEvent): void {
     e.stopImmediatePropagation();
     const el = hitTest(e.clientX, e.clientY);
     if (!el) return;
-
-    // 智能模式：点中哪个都行，系统自己推断规则
-    if (smartMode) {
-        lastHovered = el;
-        const inference = inferFromElement(el);
-        if (inference?.condition) {
-            // 只在找到"广告标记"时才圈出来；没找到就什么都别圈（免得吓人）
-            markConditional(inference.unitSelector, {
-                type: inference.condition.type,
-                value: inference.condition.value,
-            });
-        } else {
-            clearMatches();
-        }
-        chrome.runtime
-            .sendMessage({ type: 'adc:smartResult', inference })
-            .catch(() => { /* 面板没开就算了 */ });
-        hideOverlay();
-        return;
-    }
 
     /**
      * 已经选中了某个元素，而这次点的**还是它（或它内部）** → 取消选中。
@@ -679,218 +596,6 @@ function isPreviewing(): boolean {
     return draft != null || removedForPreview.length > 0;
 }
 
-/** 只把"符合条件的那几个"标出来（智能模式的预览）。 */
-function markConditional(selector: string, cond: RuleCondition | null): number {
-    clearMatches();
-    let list: Element[] = [];
-    try {
-        list = Array.from(document.querySelectorAll(selector));
-    } catch {
-        return 0;
-    }
-    let n = 0;
-    for (const el of list) {
-        if (cond && !meetsCondition(el, cond)) continue;
-        el.classList.add('__adc_match');
-        matchedEls.push(el);
-        n++;
-    }
-    lastMatchSelector = '';
-    return n;
-}
-
-// ───────────────────────── 智能推断（点一下广告） ─────────────────────────
-
-/** 内置广告词表：命中这些词的候选排在前面 */
-const AD_WORDS = ['广告', '推广', '赞助', '赞助商', '广告位', '推广位', 'AD', 'ADV', 'ad', 'sponsor'];
-
-/** 类名里的"广告词元"（按 - _ 拆开逐段比，避免 shadow/loading 里的 ad 误伤） */
-const AD_CLASS_TOKENS = new Set(['ad', 'ads', 'adv', 'advert', 'adverts', 'sponsor', 'sponsored', 'promo', 'promotion', 'badge', 'guanggao']);
-
-function classLooksAd(className: string): boolean {
-    return className
-        .toLowerCase()
-        .split(/[-_\s]+/)
-        .some((t) => AD_CLASS_TOKENS.has(t));
-}
-
-/**
- * 覆盖率上限：一个候选特征最多能命中多少比例的同类元素。
- *
- * ⚠️ 超过这个比例就不算"区分特征"了 —— 拦它等于拦全部。
- *    踩过的坑：B 站搜索页 42 个卡片里 41 个都有「稍后再看」的角落，
- *    它就被误判成广告特征了。
- */
-const COVERAGE_MAX = 0.7;
-
-/**
- * 两个元素算不算"同款"。
- *
- * ⚠️ 不能比**全部** class：广告卡片往往比普通卡片多一个标记类
- *    （例：`.feed-item` vs `.feed-item.is-ad`），
- *    按全部 class 比就会得出"它们不是同类"，整个推断直接失败。
- *    正确做法：同 tag，且**至少共享一个类**（都没类时按 tag 算）。
- */
-function isSameKind(a: Element, b: Element): boolean {
-    if (a.tagName !== b.tagName) return false;
-    const ca = Array.from(a.classList).filter((c) => !c.startsWith('__adc_'));
-    const cb = Array.from(b.classList).filter((c) => !c.startsWith('__adc_'));
-    if (ca.length === 0 && cb.length === 0) return true;
-    return ca.some((c) => cb.includes(c));
-}
-
-/**
- * 从点中的元素往上找「重复单元」——也就是"一张卡片"。
- *
- * 判断标准：这一层在它父节点下，有 ≥3 个长得一模一样的兄弟。
- * 取**最外层**满足条件的那一层（越外层越接近"整张卡片"，而不是卡片里的小块）。
- * 但有个上限：如果那一层已经比视口还高，说明爬过头了（抓到整个信息流了），不要。
- */
-function findRepeatedUnit(clicked: Element): Element | null {
-    let best: Element | null = null;
-    const vh = window.innerHeight;
-    let el: Element | null = clicked;
-    while (el && el !== document.body && el.parentElement) {
-        const cur = el;
-        const siblings = Array.from(cur.parentElement!.children).filter((c) => isSameKind(c, cur));
-        const h = el.getBoundingClientRect().height;
-        if (siblings.length >= 3 && h <= vh * 0.9) best = el;
-        el = el.parentElement;
-    }
-    return best;
-}
-
-/** 收集元素内部的短文本（可能是广告角标） */
-function collectShortTexts(root: Element): string[] {
-    const out = new Set<string>();
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    let n: Node | null;
-    let guard = 0;
-    while ((n = walker.nextNode()) && guard++ < 500) {
-        const t = (n.textContent ?? '').replace(/\s+/g, ' ').trim();
-        if (!t || t.length > 8) continue;
-        // 纯数字/符号/时长之类没意义
-        if (/^[\d\s.,:：%+\-×xX/()（）·]+$/.test(t)) continue;
-        out.add(t);
-        if (out.size >= 40) break;
-    }
-    return [...out];
-}
-
-/** 收集元素内部所有类名 */
-function collectClasses(root: Element): string[] {
-    const out = new Set<string>();
-    root.querySelectorAll('*').forEach((el) => {
-        el.classList.forEach((c) => {
-            if (!c.startsWith('__adc_')) out.add(c);
-        });
-    });
-    return [...out].slice(0, 40);
-}
-
-/**
- * 核心：点一个广告，反推出一条规则。
- *
- *   ① 往上找到"卡片"那一层
- *   ② 数出同类卡片有几个
- *   ③ 找"能把这个卡片和其他卡片区分开"的特征（短文字 / 稀有 class）
- *   ④ 挑一个最像广告的作为建议条件
- */
-function inferFromElement(clicked: Element): SmartInference | null {
-    const unit = findRepeatedUnit(clicked);
-    if (!unit) return null;
-
-    const unitSelector = buildBroadSelector(unit);
-    const all: Element[] = Array.from(document.querySelectorAll(unitSelector));
-    if (all.length < 2) return null;
-
-    // 预先算一次文字，避免下面反复触发 layout
-    const texts = all.map((el) => ((el as HTMLElement).innerText ?? el.textContent ?? '').toLowerCase());
-
-    const candidates: SmartCandidate[] = [];
-    /** 必须至少排除掉 30% 的同类元素，才算"能区分" */
-    const maxCount = Math.max(1, Math.floor(all.length * COVERAGE_MAX));
-
-    // 文字特征
-    for (const t of collectShortTexts(unit)) {
-        const low = t.toLowerCase();
-        const count = texts.filter((x) => x.includes(low)).length;
-        if (count >= 1 && count <= maxCount) {
-            candidates.push({
-                type: 'text',
-                value: t,
-                count,
-                recommended: AD_WORDS.some((w) => low.includes(w.toLowerCase())),
-            });
-        }
-    }
-
-    // 元素特征
-    for (const c of collectClasses(unit)) {
-        let count = 0;
-        for (const el of all) {
-            try {
-                if (el.querySelector(`.${CSS.escape(c)}`)) count++;
-            } catch { /* 忽略非法类名 */ }
-        }
-        if (count >= 1 && count <= maxCount) {
-            candidates.push({
-                type: 'selector',
-                value: `.${c}`,
-                count,
-                recommended: classLooksAd(c),
-            });
-        }
-    }
-
-    /**
-     * 排序规则（踩过坑后的修正版）：
-     *   ① 命中广告词表的优先
-     *   ② **出现 ≥2 次的优先** —— 只出现 1 次的多半是"内容"（比如某张封面上独有的字），
-     *      而不是"标签"。之前把封面文字「广告 3」当成了特征，就是栽在这里。
-     *   ③ 文字短的优先（「广告」比「广告 3」更像标签）
-     *   ④ 命中数少的优先
-     */
-    const rank = (c: SmartCandidate): number[] => [
-        c.recommended ? 0 : 1,
-        c.count >= 2 ? 0 : 1,
-        c.type === 'text' ? c.value.length : c.value.length + 4,
-        c.count,
-    ];
-    candidates.sort((a, b) => {
-        const ra = rank(a);
-        const rb = rank(b);
-        for (let i = 0; i < ra.length; i++) {
-            if (ra[i] !== rb[i]) return ra[i] - rb[i];
-        }
-        return 0;
-    });
-
-    // 只保留前 6 个给「调整」用
-    const top = candidates.slice(0, 6);
-
-    /**
-     * 只建议**真正像广告标记**的特征。
-     *
-     * ⚠️ 踩过的坑：一开始改成"挑最罕见的文字"，结果在 B 站搜索页挑中了
-     *    「撤销」这种页面按钮文字 —— 它确实罕见，但跟广告毫无关系。
-     *    宁可说"没找到"，也不能瞎猜：猜错会把正文干掉，比不做还糟。
-     */
-    const best = top.find((c) => c.recommended) ?? null;
-
-    const reason = best
-        ? `这类卡片一共 ${all.length} 个，其中 ${best.count} 个${best.type === 'text' ? `带「${best.value}」` : `含 ${best.value}`}。`
-        : `这类卡片一共有 ${all.length} 个，但没找到明显的广告标记（比如「广告」「推广」这类字样）。`;
-
-    return {
-        unitSelector,
-        unitCount: all.length,
-        condition: best,
-        candidates: top,
-        reason,
-    };
-}
-
 // ───────────────────────── 启动 / 消息 ─────────────────────────
 
 function domainOf(url: string): string {
@@ -965,10 +670,6 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 return false;
             case 'adc:state':
                 sendResponse({ ok: true, ...currentState() });
-                return false;
-            case 'adc:startSmart':
-                startSmart();
-                sendResponse({ ok: true });
                 return false;
             case 'adc:startPicker':
                 startPicker();

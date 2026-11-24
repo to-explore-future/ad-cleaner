@@ -126,11 +126,11 @@ const displayOf = (page, sel) => ev(page, `(() => {
     const site = await ev(panel, `document.querySelector('.site')?.innerText ?? ''`);
     check('① 面板自动认出当前标签页', site.includes('127.0.0.1'), site);
 
-    const disabled = await ev(panel, `document.querySelector('.smart-manual')?.disabled ?? true`);
+    const disabled = await ev(panel, `document.querySelector('.primary')?.disabled ?? true`);
     check('① 按钮可用（不是在"不支持"状态）', disabled === false, 'disabled=' + disabled);
 
     // ② 进入选择模式
-    await ev(panel, `(() => { document.querySelector('.smart-manual')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.primary')?.click(); return true; })()`);
     await sleep(1800);
     check('② 进入选择模式', /选择模式/.test(await ev(panel, 'document.body.innerText')));
 
@@ -323,7 +323,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
 
     // ═══════════ ⑥c 预览效果：真的应用一次，再点恢复 ═══════════
     // 此时已拦截 .ad-box（规则生效）。先重新进选择模式选一个可见元素。
-    await ev(panel, `(() => { document.querySelector('.smart-manual')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.primary')?.click(); return true; })()`);
     await sleep(1500);
     // 选 .dup.b（三个同款之一）
     const dupRect0 = await ev(page, `(() => {
@@ -380,7 +380,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // ═══════════ ⑦ 同类高亮：指着一个，页面上同款的全都标出来 ═══════════
     await page.send('Page.reload');
     await sleep(2500);
-    await ev(panel, `(() => { document.querySelector('.smart-manual')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.primary')?.click(); return true; })()`);
     await sleep(1800);
 
     // 坐标从 DOM 算（.dup.b 是三个同款之一）
@@ -469,86 +469,6 @@ const displayOf = (page, sel) => ev(page, `(() => {
         const imp = JSON.parse(imported);
         check('⑧ 导入规则成功写进存储', imp.imported === 1 && imp.sel === '.imported-ad', imported);
     }
-
-    // ═══════════ ⑨ 智能模式：点一下广告 → 自动推断 ═══════════
-    await panel.send('Page.reload').catch(() => {});
-    await page.send('Page.reload');
-    await sleep(2500);
-    // 清掉此前所有规则，保证从干净状态开始
-    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
-    await sleep(1500);
-    await ev(panel, `(() => { document.querySelector('.head-btn.on')?.click(); return true; })()`); // 若在关于页，返回
-    await sleep(400);
-
-    const smartBtn = await ev(panel, `(() => {
-        const b = document.querySelector('.smart-main');
-        if (!b) return 'none';
-        b.click();
-        return b.innerText.trim();
-    })()`);
-    check('⑨ 有「点一下广告，剩下的我来」按钮', /点一下广告/.test(smartBtn), String(smartBtn));
-    await sleep(1500);
-    check('⑨ 进入等待点选状态',
-        /在页面上点一下那个广告/.test(await ev(panel, 'document.body.innerText')));
-
-    // 在"广告卡片"上点一下（坐标从 DOM 算）
-    const adItem = await ev(page, `(() => {
-        const el = document.querySelector('.feed-item.is-ad');
-        if (!el) return '';
-        const r = el.getBoundingClientRect();
-        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
-    })()`);
-    const ap = JSON.parse(adItem || '{}');
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ap.x, y: ap.y, button: 'none' });
-    await sleep(300);
-    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: ap.x, y: ap.y, button: 'left', clickCount: 1 });
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: ap.x, y: ap.y, button: 'left', clickCount: 1 });
-    await sleep(1500);
-
-    const resultText = await ev(panel, `document.querySelector('.smart-result')?.innerText ?? ''`);
-    console.log('   · 推断结果页:', resultText.replace(/\s+/g, ' ').slice(0, 120));
-    check('⑨ 推断出"同类共几个、其中几个带广告"',
-        /这类卡片一共 6 个/.test(resultText) && /2 个/.test(resultText), resultText.replace(/\s+/g,' ').slice(0,80));
-    check('⑨ 说明里指出了「广告」这个特征', /广告/.test(resultText), '');
-    check('⑨ 有「就这么拦」按钮', /就这么拦/.test(resultText), '');
-
-    {
-        const shotSmart = await panel.send('Page.captureScreenshot', { format: 'png' });
-        fs.writeFileSync('/tmp/adc-smart.png', Buffer.from(shotSmart.data, 'base64'));
-        const shotPage = await page.send('Page.captureScreenshot', { format: 'png' });
-        fs.writeFileSync('/tmp/adc-smart-page.png', Buffer.from(shotPage.data, 'base64'));
-    }
-
-    // 页面上只标出那 2 个广告
-    const markedAd = await ev(page, `document.querySelectorAll('.__adc_match').length`);
-    check('⑨ 页面上只圈出符合条件的 2 个', Number(markedAd) === 2, `${markedAd} 个`);
-
-    // 确认拦截
-    await ev(panel, `(() => {
-        const b = [...document.querySelectorAll('.smart-actions .primary')].find(x => /就这么拦/.test(x.innerText));
-        b && b.click();
-        return true;
-    })()`);
-    await sleep(1800);
-
-    const adStates = await ev(page, `JSON.stringify({
-        ads: [...document.querySelectorAll('.feed-item.is-ad')].map(e => getComputedStyle(e).display),
-        normals: [...document.querySelectorAll('.feed-item:not(.is-ad)')].map(e => getComputedStyle(e).display),
-    })`);
-    const st9 = JSON.parse(adStates);
-    console.log('   · 广告卡片:', JSON.stringify(st9.ads), ' 普通卡片:', JSON.stringify(st9.normals));
-    check('⑨ 两个广告卡片被拦掉', st9.ads.every((d) => d === 'none'), JSON.stringify(st9.ads));
-    check('⑨ 普通卡片一个没动', st9.normals.every((d) => d !== 'none'), JSON.stringify(st9.normals));
-
-    // 规则里应该带条件
-    const savedRule = await ev(panel, `(async () => {
-        const got = await chrome.storage.local.get('blockRules');
-        const all = got.blockRules || {};
-        const list = Object.values(all).flat();
-        return JSON.stringify(list.map(r => ({ sel: r.selector, cond: r.condition || null })));
-    })()`);
-    console.log('   · 保存的规则:', savedRule);
-    check('⑨ 存下来的是"带条件"的规则', /"type":"text"/.test(savedRule) && /广告/.test(savedRule), savedRule);
 
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);

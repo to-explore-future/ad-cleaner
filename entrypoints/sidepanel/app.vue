@@ -5,7 +5,7 @@ import {
     newRuleId, saveSettings, setRuleEnabled, upsertRule,
 } from '@/utils/rules';
 import { CHANGELOG, ROADMAP } from '@/utils/changelog';
-import type { BlockRule, ElementInfo, Settings, SmartInference } from '@/utils/types';
+import type { BlockRule, ElementInfo, Settings } from '@/utils/types';
 
 // ───────────────────────── 状态 ─────────────────────────
 
@@ -52,15 +52,6 @@ const finalCount = computed(() => (pickScope.value === 'broad' ? broadCount.valu
 
 /** 当前扩展版本（从 manifest 里读，永不写死） */
 const appVersion = chrome.runtime.getManifest().version;
-
-/**
- * 智能模式（「点一下广告，剩下的我来」）。
- *   idle     → 还没开始，显示大按钮
- *   waiting  → 等用户在页面上点广告
- *   result   → 已经推断出结果，等用户确认
- */
-const smartStatus = ref<'idle' | 'waiting' | 'result'>('idle');
-const smartResult = ref<SmartInference | null>(null);
 
 /** 是否在「关于」页 */
 const showAbout = ref(false);
@@ -284,62 +275,6 @@ async function onImport(ev: Event): Promise<void> {
 }
 
 // ───────────────────────── 选择模式 ─────────────────────────
-
-// ───────────────────────── 智能模式 ─────────────────────────
-
-async function startSmart(): Promise<void> {
-    const res = await sendToTabOrInject<{ ok: boolean }>({ type: 'adc:startSmart' });
-    if (!res?.ok) {
-        showToast('这个页面里跑不起来，刷新一下页面再试');
-        return;
-    }
-    smartStatus.value = 'waiting';
-    smartResult.value = null;
-    showAbout.value = false;
-}
-
-async function cancelSmart(): Promise<void> {
-    await sendToTab({ type: 'adc:stopPicker' });
-    smartStatus.value = 'idle';
-    smartResult.value = null;
-}
-
-/** 确认：把推断出来的规则存下来并生效 */
-async function confirmSmart(mode: 'suggested' | 'all'): Promise<void> {
-    const inf = smartResult.value;
-    if (!inf) return;
-
-    const cond = mode === 'all' ? null : inf.condition;
-    const rule: BlockRule = {
-        id: newRuleId(),
-        domain: domain.value,
-        selector: inf.unitSelector,
-        action: 'hide',
-        enabled: true,
-        label: inf.unitSelector,
-        createdAt: Date.now(),
-        ...(cond ? { condition: { type: cond.type, value: cond.value } } : {}),
-    };
-
-    await upsertRule(rule);
-    await sendToTab({ type: 'adc:stopPicker' });
-    await sendToTab({ type: 'adc:reapply' });
-    smartStatus.value = 'idle';
-    smartResult.value = null;
-    await refreshRules();
-    showToast(mode === 'all' ? '已拦掉这一类全部' : '已拦掉');
-}
-
-/** 「调整」：带着推断结果进高级模式 */
-async function tuneSmart(): Promise<void> {
-    const inf = smartResult.value;
-    if (!inf) return;
-    smartStatus.value = 'idle';
-    smartResult.value = null;
-    await startPick();
-    // 把推断出的那一类选出来，让用户接着调
-    await sendToTab({ type: 'adc:selectBySelector', selector: inf.unitSelector });
-}
 
 async function startPick(): Promise<void> {
     const res = await sendToTabOrInject<{ ok: boolean }>({ type: 'adc:startPicker' });
@@ -572,14 +507,6 @@ function onRuntimeMessage(msg: unknown): void {
         matchCount.value = m.matchCount ?? 0;
         broadSelector.value = m.broadSelector ?? '';
         broadCount.value = m.broadCount ?? 0;
-    } else if (m?.type === 'adc:smartResult') {
-        const r = (msg as { inference?: SmartInference | null }).inference;
-        if (r) {
-            smartResult.value = r;
-            smartStatus.value = 'result';
-        } else {
-            showToast('没看懂这个位置，换一个地方点（点广告的图片或标题试试）');
-        }
     } else if (m?.type === 'adc:pickerEnded') {
         picking.value = false;
         editingId.value = null;
@@ -678,51 +605,8 @@ onUnmounted(() => {
             <div class="about-hint">换电脑、重装浏览器之前先导出一份。</div>
         </div>
 
-        <!-- ═══════════ 智能模式：等待点选 ═══════════ -->
-        <div v-else-if="smartStatus === 'waiting'" class="smart-wait">
-            <div class="smart-icon">🪄</div>
-            <div class="smart-title">在页面上点一下那个广告</div>
-            <div class="smart-sub">点图片、标题、角标都行，不用管选到哪一层</div>
-            <button class="ghost smart-cancel" @click="cancelSmart">取消</button>
-        </div>
-
-        <!-- ═══════════ 智能模式：推断结果 ═══════════ -->
-        <div v-else-if="smartStatus === 'result' && smartResult" class="smart-result">
-            <div class="smart-icon">✅</div>
-            <div class="smart-title">看懂了</div>
-            <div class="smart-reason">{{ smartResult.reason }}</div>
-
-            <!-- 找到区分特征 → 只拦那几个 -->
-            <template v-if="smartResult.condition">
-                <div class="smart-proposal">
-                    我拦这 <b>{{ smartResult.condition.count }}</b> 个，可以吗？
-                </div>
-                <div class="smart-syntax">{{ smartResult.unitSelector }} 含「{{ smartResult.condition.value }}」</div>
-                <div class="smart-actions">
-                    <button class="primary" @click="confirmSmart('suggested')">就这么拦</button>
-                    <button class="ghost" @click="tuneSmart">调整</button>
-                </div>
-                <button class="smart-alt" @click="confirmSmart('all')">
-                    不对，把这一类的 {{ smartResult.unitCount }} 个全拦掉
-                </button>
-            </template>
-
-            <!-- 没找到区分特征 → 只能全拦，必须先警告 -->
-            <template v-else>
-                <div class="smart-warn">
-                    {{ smartResult.reason }}直接拦会把整片内容都干掉，所以先不动。
-                </div>
-                <div class="smart-actions">
-                    <button class="ghost" @click="cancelSmart">算了</button>
-                    <button class="ghost danger" @click="tuneSmart">我自己挑</button>
-                </div>
-            </template>
-
-            <button class="smart-rerun" @click="startSmart">重新点一次</button>
-        </div>
-
         <!-- ═══════════ 规则列表 ═══════════ -->
-        <template v-else-if="!picking">
+        <template v-if="!picking">
             <div class="switch-row">
                 <div class="switch-text">
                     <div class="switch-label">显示拦截效果</div>
@@ -796,12 +680,7 @@ onUnmounted(() => {
             </div>
 
             <footer class="foot">
-                <button class="primary smart-main" :disabled="!canWork" @click="startSmart">
-                    🪄 点一下广告，剩下的我来
-                </button>
-                <button class="ghost smart-manual" :disabled="!canWork" @click="startPick">
-                    手动选（像 F12 一样）
-                </button>
+                <button class="primary" :disabled="!canWork" @click="startPick">＋ 选中要拦的东西</button>
             </footer>
         </template>
 
@@ -1168,119 +1047,6 @@ onUnmounted(() => {
 }
 .icon:hover { border-color: #00aeec; color: #00aeec; }
 .icon.danger:hover { border-color: #f53f3f; color: #f53f3f; }
-
-/* ── 智能模式 ── */
-.smart-wait, .smart-result {
-    flex: 1;
-    overflow-y: auto;
-    padding: 36px 20px 20px;
-    background: #fff;
-    text-align: center;
-}
-.smart-icon { font-size: 34px; line-height: 1.2; }
-.smart-title { margin-top: 10px; font-size: 15px; font-weight: 600; }
-.smart-sub { margin-top: 6px; font-size: 12.5px; color: #86909c; line-height: 1.7; }
-.smart-cancel {
-    margin-top: 22px;
-    width: auto;
-    padding: 0 22px;
-    height: 34px;
-    border: 1px solid #d9d9d9;
-    border-radius: 17px;
-    background: #fff;
-    color: #4e5969;
-    font-size: 13px;
-    cursor: pointer;
-}
-
-.smart-reason {
-    margin-top: 8px;
-    font-size: 13px;
-    color: #1f2329;
-    line-height: 1.8;
-}
-.smart-proposal { margin-top: 16px; font-size: 14px; }
-
-.smart-syntax {
-    margin-top: 8px;
-    font-family: ui-monospace, Menlo, monospace;
-    font-size: 11.5px;
-    color: #86909c;
-    word-break: break-all;
-}
-.smart-actions {
-    display: flex;
-    gap: 10px;
-    margin-top: 18px;
-    justify-content: center;
-}
-.smart-actions .primary {
-    flex: 1;
-    height: 38px;
-    border: none;
-    border-radius: 19px;
-    background: #00aeec;
-    color: #fff;
-    font-size: 13.5px;
-    cursor: pointer;
-}
-.smart-actions .ghost {
-    flex: none;
-    min-width: 84px;
-    height: 38px;
-    border: 1px solid #d9d9d9;
-    border-radius: 19px;
-    background: #fff;
-    color: #4e5969;
-    font-size: 13px;
-    cursor: pointer;
-}
-.smart-actions .ghost.danger { color: #f53f3f; border-color: #ffccc7; }
-
-.smart-alt, .smart-rerun {
-    margin-top: 16px;
-    border: none;
-    background: transparent;
-    color: #86909c;
-    font-size: 12px;
-    text-decoration: underline;
-    cursor: pointer;
-    display: block;
-    width: 100%;
-}
-.smart-warn {
-    margin-top: 14px;
-    padding: 10px 12px;
-    background: #fff7e8;
-    border-radius: 8px;
-    color: #d25f00;
-    font-size: 12px;
-    line-height: 1.7;
-    text-align: left;
-}
-
-.foot { display: flex; flex-direction: column; gap: 8px; }
-.smart-main {
-    width: 100%;
-    height: 40px;
-    border: none;
-    border-radius: 20px;
-    background: #00aeec;
-    color: #fff;
-    font-size: 14px;
-    cursor: pointer;
-}
-.smart-main:disabled { background: #c9cdd4; cursor: not-allowed; }
-.smart-manual {
-    width: 100%;
-    height: 32px;
-    border: 1px solid #e5e6eb;
-    border-radius: 16px;
-    background: #fff;
-    color: #86909c;
-    font-size: 12px;
-    cursor: pointer;
-}
 
 /* ── 底部按钮 ── */
 .foot {

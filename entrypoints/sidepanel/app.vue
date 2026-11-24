@@ -15,6 +15,26 @@ const domain = ref('');
 const rules = ref<BlockRule[]>([]);
 /** 每条规则当前在页面上命中几个元素（0 = 已经匹配不到了） */
 const counts = ref<Record<string, number>>({});
+/** 命中数是否已经问回来了（没回来之前先别过滤，免得列表闪空） */
+const countsReady = ref(false);
+
+/**
+ * 规则列表看哪一批：
+ *   page → **默认**：只看这个网页上真正命中的规则（命中数 > 0）
+ *   site → 这个网站的全部规则（包括当前页面用不到的）
+ */
+const ruleFilter = ref<'page' | 'site'>('page');
+
+/** 当前该显示的规则 */
+const visibleRules = computed(() => {
+    if (ruleFilter.value === 'site' || !countsReady.value) return rules.value;
+    return rules.value.filter((r) => (counts.value[r.id] ?? 0) > 0);
+});
+
+/** 本页命中了几条（给标签上的数字用） */
+const pageHitCount = computed(() =>
+    rules.value.filter((r) => (counts.value[r.id] ?? 0) > 0).length,
+);
 const settings = ref<Settings>({ showEffect: true });
 
 /** 选择模式 */
@@ -180,8 +200,10 @@ async function loadPage(): Promise<void> {
 
 /** 问页面：这些选择器各命中几个元素。 */
 async function refreshCounts(): Promise<void> {
+    countsReady.value = false;
     if (!canWork.value || rules.value.length === 0) {
         counts.value = {};
+        countsReady.value = true;
         return;
     }
     /**
@@ -198,6 +220,7 @@ async function refreshCounts(): Promise<void> {
         out[r.id] = res?.counts?.[i] ?? -1;
     });
     counts.value = out;
+    countsReady.value = true;
 }
 
 // ───────────────────────── 规则操作 ─────────────────────────
@@ -632,6 +655,26 @@ onUnmounted(() => {
                 <div v-if="!canWork" class="empty">
                     打开一个普通网页后再用（浏览器内部页面无法拦截）
                 </div>
+
+                <!-- 本页 / 本网站 切换：默认只看本页命中的 -->
+                <div v-else-if="rules.length > 0" class="rule-filter">
+                    <button
+                        class="rf-btn"
+                        :class="{ on: ruleFilter === 'page' }"
+                        @click="ruleFilter = 'page'"
+                    >本页 {{ pageHitCount }}</button>
+                    <button
+                        class="rf-btn"
+                        :class="{ on: ruleFilter === 'site' }"
+                        @click="ruleFilter = 'site'"
+                    >本网站 {{ rules.length }}</button>
+                </div>
+                <div v-else-if="visibleRules.length === 0 && ruleFilter === 'page'" class="empty">
+                    这个页面上没有需要拦的东西<br />
+                    <button class="link-btn" @click="ruleFilter = 'site'">
+                        看本网站全部 {{ rules.length }} 条规则
+                    </button>
+                </div>
                 <div v-else-if="rules.length === 0" class="empty guide">
                     <div class="guide-title">这个站点还没有拦截规则</div>
                     <ol class="guide-steps">
@@ -643,7 +686,7 @@ onUnmounted(() => {
                 </div>
 
                 <div
-                    v-for="r in rules"
+                    v-for="r in visibleRules"
                     :key="r.id"
                     class="rule"
                     :class="{ off: !r.enabled }"
@@ -955,6 +998,38 @@ onUnmounted(() => {
     transition: transform .15s;
 }
 .switch.on .knob { transform: translateX(18px); }
+
+/* 本页/本网站 切换 */
+.rule-filter {
+    display: flex;
+    gap: 8px;
+    padding: 0 2px 10px;
+}
+.rf-btn {
+    flex: none;
+    padding: 5px 12px;
+    border: 1px solid #e5e6eb;
+    border-radius: 14px;
+    background: #fff;
+    color: #86909c;
+    font-size: 12px;
+    cursor: pointer;
+}
+.rf-btn.on {
+    border-color: #00aeec;
+    color: #00aeec;
+    background: #f0fbff;
+}
+
+.link-btn {
+    margin-top: 8px;
+    border: none;
+    background: transparent;
+    color: #00aeec;
+    font-size: 12.5px;
+    text-decoration: underline;
+    cursor: pointer;
+}
 
 /* ── 规则列表 ── */
 .list { flex: 1; overflow-y: auto; padding: 10px; }

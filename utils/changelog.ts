@@ -16,6 +16,16 @@ export interface VersionEntry {
 /** 已发布 + 正在开发中的版本（从新到旧） */
 export const CHANGELOG: VersionEntry[] = [
     {
+        version: '0.0.2',
+        date: '本次',
+        items: [
+            '规则列表默认只显示「本页真正命中的规则」，命中 0 的先藏起来',
+            '顶部多了「本页 / 本网站」切换，要看本站全部规则点一下就行',
+            '图标改成 ADB 字标',
+            '修：换版本后旧页面脚本失效导致命中数显示「—」',
+        ],
+    },
+    {
         version: '0.0.1',
         date: '首个版本',
         items: [

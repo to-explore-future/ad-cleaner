@@ -470,6 +470,41 @@ const displayOf = (page, sel) => ev(page, `(() => {
         check('⑧ 导入规则成功写进存储', imp.imported === 1 && imp.sel === '.imported-ad', imported);
     }
 
+    // ═══════════ ⑨ 规则列表默认只看本页命中的 ═══════════
+    // 造两条规则：一条能命中（.feed-item），一条命中 0（.不存在的类）
+    await page.send('Page.reload');
+    await sleep(2200);
+    await ev(panel, `(async () => {
+        const got = await chrome.storage.local.get('blockRules');
+        const all = got.blockRules || {};
+        const d = Object.keys(all)[0] || location.hostname;
+        all[d] = [
+            { id: 'hit1', domain: d, selector: '.feed-item', action: 'hide', enabled: true,
+              label: 'div.feed-item', createdAt: Date.now() },
+            { id: 'miss1', domain: d, selector: '.this-does-not-exist-xyz', action: 'hide', enabled: true,
+              label: 'div.nothing', createdAt: Date.now() },
+        ];
+        await chrome.storage.local.set({ blockRules: all });
+        return 'ok';
+    })()`);
+    await sleep(2500);
+
+    const tabs = await ev(panel, `JSON.stringify([...document.querySelectorAll('.rf-btn')].map(b => b.innerText.trim()))`);
+    console.log('   · 筛选标签:', tabs);
+    check('⑨ 有「本页 / 本网站」两个标签', /本页/.test(tabs) && /本网站/.test(tabs), tabs);
+
+    const shownDefault = await ev(panel, `[...document.querySelectorAll('.rule .rule-label')].map(e => e.innerText.replace(/\s+/g,' ').trim())`);
+    console.log('   · 默认显示的规则:', JSON.stringify(shownDefault));
+    check('⑨ 默认只显示本页命中的规则（1 条）', shownDefault.length === 1, `${shownDefault.length} 条`);
+    check('⑨ 命中 0 的那条默认不显示', !shownDefault.some((t) => /nothing/.test(t)), JSON.stringify(shownDefault));
+
+    // 切到本网站 → 两条都在
+    await ev(panel, `(() => { const b=[...document.querySelectorAll('.rf-btn')].find(x=>/本网站/.test(x.innerText)); b&&b.click(); return true; })()`);
+    await sleep(600);
+    const shownSite = await ev(panel, `[...document.querySelectorAll('.rule .rule-label')].map(e => e.innerText.replace(/\s+/g,' ').trim())`);
+    console.log('   · 本网站显示的规则:', JSON.stringify(shownSite));
+    check('⑨ 切到「本网站」能看到全部 2 条', shownSite.length === 2, `${shownSite.length} 条`);
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

@@ -669,7 +669,7 @@ onUnmounted(() => {
                         @click="ruleFilter = 'site'"
                     >本网站 {{ rules.length }}</button>
                 </div>
-                <div v-else-if="visibleRules.length === 0 && ruleFilter === 'page'" class="empty">
+                <div v-else-if="rules.length > 0 && visibleRules.length === 0 && ruleFilter === 'page'" class="empty">
                     这个页面上没有需要拦的东西<br />
                     <button class="link-btn" @click="ruleFilter = 'site'">
                         看本网站全部 {{ rules.length }} 条规则

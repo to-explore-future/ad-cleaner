@@ -184,7 +184,12 @@ async function refreshCounts(): Promise<void> {
         counts.value = {};
         return;
     }
-    const res = await sendToTab<{ ok: boolean; counts: number[] }>({
+    /**
+     * ⚠️ 用 sendToTabOrInject：换了新版本之后，**已经打开的页面里还是旧脚本**
+     *    （上下文已失效），直接发消息会失败 —— 表现就是命中数全是「—」。
+     *    这里发不通就自动补注入一次，用户不用手动刷新。
+     */
+    const res = await sendToTabOrInject<{ ok: boolean; counts: number[] }>({
         type: 'adc:countAll',
         selectors: rules.value.map((r) => r.selector),
     });

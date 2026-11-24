@@ -1,8 +1,8 @@
 {
-  "name": "ad-cleaner",
-  "description": "广告清道夫 —— 像 F12 一样在页面上点选要拦的东西，还能沿着 DOM 树往外扩一层。",
+  "name": "ad-block-helper",
+  "description": "广告拦截助手 —— 像 F12 一样在页面上点选不想看的内容，把它留空。",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",

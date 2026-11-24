@@ -9,7 +9,7 @@ export default defineBackground(() => {
     const open = () => {
         chrome.sidePanel
             .setPanelBehavior({ openPanelOnActionClick: true })
-            .catch((e) => console.warn('[广告清道夫] setPanelBehavior 失败', e));
+            .catch((e) => console.warn('[广告拦截助手] setPanelBehavior 失败', e));
     };
     chrome.runtime.onInstalled.addListener(open);
     open();

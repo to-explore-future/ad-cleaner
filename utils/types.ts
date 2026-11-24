@@ -1,6 +1,18 @@
 /** 拦截方式：隐藏（保留布局占位）或删除（从 DOM 移除）。 */
 export type RuleAction = 'hide' | 'remove';
 
+/**
+ * 规则条件：光有选择器不够，还要"内部得有什么"才拦。
+ *
+ * 真实场景：信息流里所有卡片 class 都一样，只有广告卡片内部带一个「广告」角标。
+ * 光按 class 拦会把整条信息流干掉。
+ */
+export interface RuleCondition {
+    /** text = 内部包含这段文字；selector = 内部含有匹配这个选择器的元素 */
+    type: 'text' | 'selector';
+    value: string;
+}
+
 /** 一条拦截规则。 */
 export interface BlockRule {
     id: string;
@@ -12,6 +24,8 @@ export interface BlockRule {
     enabled: boolean;
     /** 给人看的短描述，例如 `div.ad-box` */
     label: string;
+    /** 可选条件：命中选择器之后，还要满足这个条件才拦 */
+    condition?: RuleCondition;
     createdAt: number;
 }
 

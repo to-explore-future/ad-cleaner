@@ -4,7 +4,6 @@ import {
     deleteRule, exportAllRules, importRules, loadRulesFor, loadSettings,
     newRuleId, saveSettings, setRuleEnabled, upsertRule,
 } from '@/utils/rules';
-import { CHANGELOG, ROADMAP } from '@/utils/changelog';
 import type { BlockRule, ElementInfo, Settings } from '@/utils/types';
 
 // ───────────────────────── 状态 ─────────────────────────
@@ -40,10 +39,23 @@ const settings = ref<Settings>({ showEffect: true });
 /** 选择模式 */
 const picking = ref(false);
 const editingId = ref<string | null>(null);
-const chain = ref<ElementInfo[]>([]);
+/** 完整 DOM 树（扁平化后的一串节点） */
+const tree = ref<{ path: string; depth: number; tag: string; id: string; classes: string[]; hasChildren: boolean; expanded: boolean; current: boolean }[]>([]);
+const currentPath = ref('');
 const currentIndex = ref(-1);
 const selector = ref('');
 const matchCount = ref(0);
+
+/**
+ * 「加条件」：让规则更精细 —— 命中这个选择器、**并且**内部包含某个东西才拦。
+ *   条件选法：点「+ 加条件」→ 去页面上点那个能区分广告的东西 → 挑一个候选
+ */
+const condition = ref<{ type: 'text' | 'selector'; value: string } | null>(null);
+/** 正在等用户去页面上点条件 */
+const condPicking = ref(false);
+/** 点完之后算出来的候选 */
+const condCandidates = ref<{ type: 'text' | 'selector'; value: string; count: number }[]>([]);
+const condTotal = ref(0);
 /** 这次要用的拦截方式（隐藏 / 删除） */
 const pickAction = ref<'hide' | 'remove'>('hide');
 
@@ -71,10 +83,7 @@ const finalSelector = computed(() => (pickScope.value === 'broad' ? broadSelecto
 const finalCount = computed(() => (pickScope.value === 'broad' ? broadCount.value : matchCount.value));
 
 /** 当前扩展版本（从 manifest 里读，永不写死） */
-const appVersion = chrome.runtime.getManifest().version;
-
-/** 是否在「关于」页 */
-const showAbout = ref(false);
+const fileInput = ref<HTMLInputElement | null>(null);
 
 const toast = ref('');
 let toastTimer: number | null = null;
@@ -85,13 +94,14 @@ function showToast(msg: string): void {
 }
 
 const canWork = computed(() => !!domain.value && tabId.value != null);
-const currentEl = computed(() => (currentIndex.value >= 0 ? chain.value[currentIndex.value] : null));
+/** 当前选中的树节点 */
+const currentNode = computed(() => tree.value.find((n) => n.current) ?? null);
 
 /** 当前选中那层的短标签，例如 `div.ad-box` */
 const currentLabel = computed(() => {
-    const el = currentEl.value;
-    if (!el) return '';
-    return el.classes.length ? `${el.tag}.${el.classes[0]}` : el.tag;
+    const n = currentNode.value;
+    if (!n) return '';
+    return n.classes.length ? `${n.tag}.${n.classes[0]}` : n.tag;
 });
 
 // ───────────────────────── 与页面通信 ─────────────────────────
@@ -194,7 +204,7 @@ async function loadPage(): Promise<void> {
         rules.value = canWork.value ? await loadRulesFor(domain.value) : [];
         await refreshCounts();
     } catch (e) {
-        console.warn('[广告清道夫] 读取当前页面失败', e);
+        console.warn('[广告拦截助手] 读取当前页面失败', e);
     }
 }
 
@@ -265,23 +275,67 @@ async function onToggleEffect(): Promise<void> {
     showToast(settings.value.showEffect ? '悬浮规则可预览影响范围' : '已关闭预览');
 }
 
+/** 打开产品介绍页（关于 / 版本进度都在那里）。 */
+function openHomepage(): void {
+    void chrome.tabs.create({ url: 'https://tianrunye.com/adcleaner' });
+}
+
+// ───────────────────────── 「加条件」 ─────────────────────────
+
+async function startCondPick(): Promise<void> {
+    const sel = finalSelector.value;
+    if (!sel) {
+        showToast('先选中要拦的东西');
+        return;
+    }
+    condCandidates.value = [];
+    condTotal.value = 0;
+    const res = await sendToTabOrInject<{ ok: boolean }>({ type: 'adc:startCondPick', selector: sel });
+    if (!res?.ok) {
+        showToast('这个页面里跑不起来，刷新一下再试');
+        return;
+    }
+    condPicking.value = true;
+}
+
+async function pickCondition(c: { type: 'text' | 'selector'; value: string }): Promise<void> {
+    const sel = finalSelector.value;
+    if (!sel) return;
+    condition.value = { type: c.type, value: c.value };
+    condPicking.value = false;
+    condCandidates.value = [];
+    await sendToTab({ type: 'adc:markCondition', selector: sel, condition: condition.value });
+}
+
+async function clearCondition(): Promise<void> {
+    condition.value = null;
+    condPicking.value = false;
+    condCandidates.value = [];
+    await sendToTab({ type: 'adc:clearCondition' });
+}
+
 // ───────────────────────── 导入 / 导出 ─────────────────────────
 
 /** 导出所有规则成 .json 文件 */
 async function onExport(): Promise<void> {
     try {
-        const text = await exportAllRules(appVersion);
+        const text = await exportAllRules(chrome.runtime.getManifest().version);
         const blob = new Blob([text], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `广告清道夫-规则-${new Date().toISOString().slice(0, 10)}.json`;
+        a.download = `广告拦截助手-规则-${new Date().toISOString().slice(0, 10)}.json`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
         showToast('已导出');
     } catch (e) {
         showToast('导出失败：' + (e instanceof Error ? e.message : String(e)));
     }
+}
+
+/** 触发隐藏的文件选择器 */
+function triggerImport(): void {
+    fileInput.value?.click();
 }
 
 /** 从文件导入规则 */
@@ -312,6 +366,9 @@ async function startPick(): Promise<void> {
     }
     editingId.value = null;
     pickAction.value = 'hide';
+    condition.value = null;
+    condPicking.value = false;
+    condCandidates.value = [];
     pickScope.value = 'one';
     previewing.value = false;
     scopeTouched.value = false;
@@ -320,8 +377,8 @@ async function startPick(): Promise<void> {
     broadCount.value = 0;
     picking.value = true;
     startPolling();
-    chain.value = [];
-    currentIndex.value = -1;
+    tree.value = [];
+    currentPath.value = '';
     selector.value = '';
     matchCount.value = 0;
 }
@@ -338,8 +395,8 @@ async function startEdit(rule: BlockRule): Promise<void> {
     broadCount.value = 0;
     picking.value = true;
     startPolling();
-    chain.value = [];
-    currentIndex.value = -1;
+    tree.value = [];
+    currentPath.value = '';
     selector.value = '';
     matchCount.value = 0;
 
@@ -358,6 +415,23 @@ async function setScope(scope: 'one' | 'broad'): Promise<void> {
     pickScope.value = scope;
     const sel = scope === 'broad' ? broadSelector.value : selector.value;
     if (sel) await sendToTab({ type: 'adc:markMatches', selector: sel });
+}
+
+/** 展开 / 收起树节点 */
+function togglePath(path: string): void {
+    void sendToTab({ type: 'adc:togglePath', path });
+}
+
+/** 选中树节点 */
+function selectPath(path: string): void {
+    void stopPreview();
+    currentPath.value = path;
+    void sendToTab({ type: 'adc:selectPath', path });
+}
+
+/** 悬停树节点 → 页面上高亮 */
+function hoverPath(path: string): void {
+    void sendToTab({ type: 'adc:highlightPath', path });
 }
 
 function selectAncestor(i: number): void {
@@ -406,17 +480,16 @@ async function cancelPick(): Promise<void> {
     await sendToTab({ type: 'adc:stopPicker' });
     picking.value = false;
     editingId.value = null;
-    chain.value = [];
-    currentIndex.value = -1;
+    tree.value = [];
+    currentPath.value = '';
 }
 
 async function confirmPick(): Promise<void> {
-    if (!finalSelector.value || currentIndex.value < 0) {
+    if (!finalSelector.value || !currentNode.value) {
         showToast('先在页面上点一下要拦的东西');
         return;
     }
-    const el = currentEl.value;
-    const label = el ? (el.classes.length ? `${el.tag}.${el.classes[0]}` : el.tag) : selector.value;
+    const label = currentLabel.value || finalSelector.value;
     const old = editingId.value ? rules.value.find((r) => r.id === editingId.value) : null;
 
     const rule: BlockRule = {
@@ -427,6 +500,7 @@ async function confirmPick(): Promise<void> {
         enabled: true,
         label,
         createdAt: old?.createdAt ?? Date.now(),
+        ...(condition.value ? { condition: condition.value } : {}),
     };
 
     previewing.value = false;
@@ -468,15 +542,16 @@ async function pollPickerState(): Promise<void> {
             ok: boolean; picking: boolean; locked: boolean;
             chain: ElementInfo[]; currentIndex: number; selector: string; matchCount: number;
             broadSelector: string; broadCount: number;
+            tree: typeof tree.value; currentPath: string;
         }>({ type: 'adc:state' });
         if (st?.ok) {
             pollFailures.value = 0;
-            chain.value = st.chain;
-            currentIndex.value = st.currentIndex;
             selector.value = st.selector;
             matchCount.value = st.matchCount;
             broadSelector.value = st.broadSelector ?? '';
             broadCount.value = st.broadCount ?? 0;
+            tree.value = st.tree ?? [];
+            currentPath.value = st.currentPath ?? '';
             /**
              * 默认按 **class** 拦（用户明确要求）。
              * 只要页面上真的存在"同类"，第一次拿到数量就自动切过去；
@@ -517,7 +592,7 @@ function stopPolling(): void {
 }
 
 // 选中层变化时，把树里的当前行滚进视野
-watch(currentIndex, async () => {
+watch(currentPath, async () => {
     await nextTick();
     const row = treeEl.value?.querySelector('.row.current') as HTMLElement | null;
     row?.scrollIntoView({ block: 'nearest' });
@@ -525,21 +600,29 @@ watch(currentIndex, async () => {
 
 function onRuntimeMessage(msg: unknown): void {
     const m = msg as {
-        type?: string; chain?: ElementInfo[]; currentIndex?: number;
+        type?: string;
         selector?: string; matchCount?: number; broadSelector?: string; broadCount?: number;
     };
     if (m?.type === 'adc:pickerChanged') {
-        chain.value = m.chain ?? [];
-        currentIndex.value = m.currentIndex ?? -1;
         selector.value = m.selector ?? '';
         matchCount.value = m.matchCount ?? 0;
         broadSelector.value = m.broadSelector ?? '';
         broadCount.value = m.broadCount ?? 0;
+        tree.value = (msg as { tree?: typeof tree.value }).tree ?? [];
+        currentPath.value = (msg as { currentPath?: string }).currentPath ?? '';
+    } else if (m?.type === 'adc:condPicked') {
+        const r = msg as { total?: number; candidates?: typeof condCandidates.value };
+        condTotal.value = r.total ?? 0;
+        condCandidates.value = r.candidates ?? [];
+        condPicking.value = false;
+        if (condCandidates.value.length === 0) {
+            showToast('这个位置没找到能区分的东西，换个地方点（比如广告角标上的字）');
+        }
     } else if (m?.type === 'adc:pickerEnded') {
         picking.value = false;
         editingId.value = null;
-        chain.value = [];
-        currentIndex.value = -1;
+        tree.value = [];
+        currentPath.value = '';
     }
 }
 
@@ -571,67 +654,16 @@ onUnmounted(() => {
 <template>
     <div class="panel">
         <header class="head">
+            <!-- 侧边栏标题栏已经写了插件名，这里不再重复，只显示当前站点 -->
             <div class="head-main">
-                <div class="title">广告清道夫</div>
-                <div class="site">{{ domain || '当前页面不可用' }}</div>
+                <div class="site big">{{ domain || '当前页面不可用' }}</div>
             </div>
-            <button
-                class="head-btn"
-                :class="{ on: showAbout }"
-                :title="showAbout ? '返回' : '关于 / 版本进度'"
-                @click="showAbout = !showAbout"
-            >
-                <svg v-if="!showAbout" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+            <button class="head-btn" title="产品介绍 / 版本进度" @click="openHomepage">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
                     <circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 8h.01" />
                 </svg>
-                <span v-else class="head-back">返回</span>
             </button>
         </header>
-
-        <!-- ═══════════ 关于 / 版本进度 ═══════════ -->
-        <div v-if="showAbout" class="about">
-            <div class="about-head">
-                <div class="about-name">广告清道夫</div>
-                <div class="about-ver">版本 {{ appVersion }}</div>
-            </div>
-            <p class="about-slogan">像 F12 一样点选要拦的东西，还能沿着 DOM 树往外扩。</p>
-
-            <div class="about-note">
-                所有规则只存在你这台电脑的浏览器里，<b>不会上传到任何服务器</b>。
-            </div>
-
-            <div class="about-section">这个版本做了什么</div>
-            <div v-for="v in CHANGELOG" :key="v.version" class="ver">
-                <div class="ver-head">
-                    <span class="ver-no">v{{ v.version }}</span>
-                    <span class="ver-date">{{ v.date }}</span>
-                </div>
-                <ul class="ver-items">
-                    <li v-for="(it, i) in v.items" :key="i">{{ it }}</li>
-                </ul>
-            </div>
-
-            <div class="about-section">后面计划做什么</div>
-            <div v-for="v in ROADMAP" :key="v.version" class="ver planned">
-                <div class="ver-head">
-                    <span class="ver-no">v{{ v.version }}</span>
-                    <span class="ver-tag">计划中</span>
-                </div>
-                <ul class="ver-items">
-                    <li v-for="(it, i) in v.items" :key="i">{{ it }}</li>
-                </ul>
-            </div>
-
-            <div class="about-section">规则备份</div>
-            <div class="about-actions">
-                <button class="ghost" @click="onExport">导出所有规则</button>
-                <label class="ghost file-label">
-                    导入规则
-                    <input type="file" accept="application/json,.json" @change="onImport" />
-                </label>
-            </div>
-            <div class="about-hint">换电脑、重装浏览器之前先导出一份。</div>
-        </div>
 
         <!-- ═══════════ 规则列表 ═══════════ -->
         <template v-if="!picking">
@@ -656,20 +688,26 @@ onUnmounted(() => {
                     打开一个普通网页后再用（浏览器内部页面无法拦截）
                 </div>
 
-                <!-- 本页 / 本网站 切换：默认只看本页命中的 -->
-                <div v-else-if="rules.length > 0" class="rule-filter">
-                    <button
-                        class="rf-btn"
-                        :class="{ on: ruleFilter === 'page' }"
-                        @click="ruleFilter = 'page'"
-                    >本页 {{ pageHitCount }}</button>
-                    <button
-                        class="rf-btn"
-                        :class="{ on: ruleFilter === 'site' }"
-                        @click="ruleFilter = 'site'"
-                    >本网站 {{ rules.length }}</button>
+                <!-- 顶部工具条：本页/本网站切换 + 导入导出（一直可见，没规则时也能导入） -->
+                <template v-else>
+                <div class="rule-filter">
+                    <template v-if="rules.length > 0">
+                        <button
+                            class="rf-btn"
+                            :class="{ on: ruleFilter === 'page' }"
+                            @click="ruleFilter = 'page'"
+                        >本页 {{ pageHitCount }}</button>
+                        <button
+                            class="rf-btn"
+                            :class="{ on: ruleFilter === 'site' }"
+                            @click="ruleFilter = 'site'"
+                        >本网站 {{ rules.length }}</button>
+                    </template>
+                    <span class="rf-spacer"></span>
+                    <button class="rf-link" @click="triggerImport">导入</button>
+                    <button class="rf-link" @click="onExport">导出</button>
                 </div>
-                <div v-else-if="rules.length > 0 && visibleRules.length === 0 && ruleFilter === 'page'" class="empty">
+                <div v-if="rules.length > 0 && visibleRules.length === 0 && ruleFilter === 'page'" class="empty">
                     这个页面上没有需要拦的东西<br />
                     <button class="link-btn" @click="ruleFilter = 'site'">
                         看本网站全部 {{ rules.length }} 条规则
@@ -703,6 +741,9 @@ onUnmounted(() => {
                     <div class="rule-main">
                         <div class="rule-label">
                             {{ r.label || r.selector }}
+                            <span v-if="r.condition" class="cond-tag">
+                                {{ r.condition.type === 'text' ? `含「${r.condition.value}」` : `含 ${r.condition.value}` }}
+                            </span>
                             <span v-if="!r.enabled" class="off-tag">已停用</span>
                         </div>
                         <div v-if="r.selector !== r.label" class="rule-sel">{{ r.selector }}</div>
@@ -725,6 +766,7 @@ onUnmounted(() => {
                         </svg>
                     </button>
                 </div>
+                </template>
             </div>
 
             <footer class="foot">
@@ -753,20 +795,33 @@ onUnmounted(() => {
 
             <div ref="treeEl" class="tree">
                 <div
-                    v-for="(el, i) in chain"
-                    :key="i"
+                    v-for="n in tree"
+                    :key="n.path"
                     class="row"
-                    :class="{ current: i === currentIndex }"
-                    :style="{ paddingLeft: 8 + i * 10 + 'px' }"
-                    @click="selectAncestor(i)"
-                    @mouseenter="hoverAncestor(i)"
+                    :class="{ current: n.current }"
+                    :style="{ paddingLeft: 4 + n.depth * 11 + 'px' }"
                 >
-                    <span class="tag">{{ el.tag }}</span>
-                    <span v-if="el.id" class="id">#{{ el.id }}</span>
-                    <span v-for="c in el.classes.slice(0, 2)" :key="c" class="cls">.{{ c }}</span>
-                    <span class="size">{{ el.width }}×{{ el.height }}</span>
+                    <!-- 展开/收起 -->
+                    <span
+                        v-if="n.hasChildren"
+                        class="arrow"
+                        :class="{ open: n.expanded }"
+                        @click.stop="togglePath(n.path)"
+                    >{{ n.expanded ? '▾' : '▸' }}</span>
+                    <span v-else class="arrow empty"></span>
+
+                    <!-- 点这一行 = 选中这个元素 -->
+                    <span
+                        class="name"
+                        @click="selectPath(n.path)"
+                        @mouseenter="hoverPath(n.path)"
+                    >
+                        <span class="tag">{{ n.tag }}</span>
+                        <span v-if="n.id" class="id">#{{ n.id }}</span>
+                        <span v-for="c in n.classes" :key="c" class="cls">.{{ c }}</span>
+                    </span>
                 </div>
-                <div v-if="chain.length === 0" class="tree-empty">
+                <div v-if="tree.length === 0" class="tree-empty">
                     把鼠标移到页面上
                 </div>
             </div>
@@ -776,6 +831,35 @@ onUnmounted(() => {
                     <span class="k">选择器</span>
                     <span class="v">{{ finalSelector || '—' }}</span>
                 </div>
+                <!-- 条件：命中这个选择器、并且内部含某东西才拦 -->
+                <div class="info-row">
+                    <span class="k">条件</span>
+                    <span v-if="condition" class="v cond-on">
+                        {{ condition.type === 'text' ? `含「${condition.value}」` : `含 ${condition.value}` }}
+                    </span>
+                    <span v-else class="v muted">{{ condPicking ? '去页面上点一下…' : '不限' }}</span>
+                    <button v-if="condition" class="mini-btn" @click="clearCondition">清除</button>
+                    <button v-else class="mini-btn" :disabled="condPicking" @click="startCondPick">
+                        {{ condPicking ? '等待点选' : '+ 加条件' }}
+                    </button>
+                </div>
+
+                <!-- 点完条件后的候选列表 -->
+                <div v-if="condCandidates.length > 0" class="cond-list">
+                    <div class="cond-tip">挑一个当条件（命中数越少越精确）：</div>
+                    <button
+                        v-for="c in condCandidates"
+                        :key="c.type + c.value"
+                        class="cond-opt"
+                        @click="pickCondition(c)"
+                    >
+                        <span class="cond-what">
+                            {{ c.type === 'text' ? `含文字「${c.value}」` : `含 ${c.value}` }}
+                        </span>
+                        <span class="cond-num">{{ c.count }} / {{ condTotal }}</span>
+                    </button>
+                </div>
+
                 <div class="info-row">
                     <span class="k">范围</span>
                     <span class="seg">
@@ -844,6 +928,15 @@ onUnmounted(() => {
             </footer>
         </template>
 
+        <!-- 隐藏的文件选择器：靠 JS 触发，界面上不出现原生控件 -->
+        <input
+            ref="fileInput"
+            type="file"
+            accept="application/json,.json"
+            style="display: none"
+            @change="onImport"
+        />
+
         <div v-if="toast" class="toast">{{ toast }}</div>
     </div>
 </template>
@@ -868,6 +961,13 @@ onUnmounted(() => {
     background: #fff;
     border-bottom: 1px solid #e5e6eb;
 }
+.site.big {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1f2329;
+        font-family: ui-monospace, Menlo, monospace;
+}
+
 .title { font-size: 15px; font-weight: 600; }
 .site { margin-top: 3px; font-size: 12px; color: #86909c; }
 
@@ -1015,6 +1115,19 @@ onUnmounted(() => {
     font-size: 12px;
     cursor: pointer;
 }
+.rf-spacer { flex: 1; }
+
+.rf-link {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: #86909c;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 2px;
+}
+.rf-link:hover { color: #00aeec; text-decoration: underline; }
+
 .rf-btn.on {
     border-color: #00aeec;
     color: #00aeec;
@@ -1084,6 +1197,16 @@ onUnmounted(() => {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.cond-tag {
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: #e8f4fd;
+    color: #0b6ea8;
+    font-size: 10.5px;
+    font-weight: 400;
 }
 
 .off-tag {
@@ -1221,21 +1344,67 @@ onUnmounted(() => {
     background: #fff;
     padding: 6px 0;
 }
+.kids-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px 4px;
+    margin-top: 6px;
+    border-top: 1px dashed #e5e6eb;
+    font-size: 11.5px;
+    color: #86909c;
+}
+.kids-tip { font-size: 10.5px; color: #c9cdd4; }
+
+.row.kid { padding-left: 12px; }
+
 .tree-empty { padding: 30px 14px; color: #86909c; font-size: 12px; text-align: center; }
 
 .row {
     display: flex;
     align-items: center;
-    gap: 4px;
-    height: 26px;
-    padding-right: 10px;
-    cursor: pointer;
+    gap: 2px;
+    height: 24px;
+    padding-right: 8px;
     font-size: 12px;
     white-space: nowrap;
     overflow: hidden;
 }
-.row:hover { background: #f2f9fd; }
-.row.current { background: #e6f7ff; box-shadow: inset 2px 0 0 #00aeec; }
+
+/* 展开箭头 */
+.arrow {
+    flex: none;
+    width: 14px;
+    text-align: center;
+    color: #86909c;
+    font-size: 9px;
+    cursor: pointer;
+    user-select: none;
+}
+.arrow:hover { color: #00aeec; }
+.arrow.empty { cursor: default; }
+
+/* 节点名（点了就选中） */
+.name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+}
+/* 悬浮：很淡的一层 */
+.name:hover { background: #f0f6fa; }
+.row:hover { background: #f7fafc; }
+
+/* 选中：明显加深 + 左侧蓝条 + 加粗，一眼看出选的是哪个 */
+.row.current {
+    background: #d6ecff;
+    box-shadow: inset 3px 0 0 #00aeec;
+}
+.row.current .name { font-weight: 600; }
+.row.current .tag { color: #005f8a; }
 
 .tag { color: #7a5af8; }
 .id { color: #f53f3f; }
@@ -1293,6 +1462,48 @@ onUnmounted(() => {
     font-size: 11.5px;
     line-height: 1.6;
 }
+
+.mini-btn {
+    flex: none;
+    border: 1px solid #d9d9d9;
+    background: #fff;
+    color: #4e5969;
+    border-radius: 11px;
+    font-size: 11.5px;
+    padding: 2px 10px;
+    cursor: pointer;
+}
+.mini-btn:hover:not(:disabled) { border-color: #00aeec; color: #00aeec; }
+.mini-btn:disabled { color: #c9cdd4; cursor: default; }
+
+.v.muted { color: #c9cdd4; }
+.v.cond-on { color: #00aeec; }
+
+.cond-list {
+    margin: 6px 0 8px;
+    padding: 8px 10px;
+    background: #f7f8fa;
+    border-radius: 8px;
+}
+.cond-tip { font-size: 11.5px; color: #86909c; margin-bottom: 6px; }
+.cond-opt {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 8px;
+    padding: 6px 8px;
+    margin-top: 4px;
+    border: 1px solid #e5e6eb;
+    border-radius: 6px;
+    background: #fff;
+    font-size: 12px;
+    color: #1f2329;
+    cursor: pointer;
+    text-align: left;
+}
+.cond-opt:hover { border-color: #00aeec; color: #00aeec; }
+.cond-what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cond-num { flex: none; color: #86909c; font-size: 11px; }
 
 .seg {
     display: inline-flex;

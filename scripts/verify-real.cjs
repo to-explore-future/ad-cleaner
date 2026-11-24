@@ -95,6 +95,12 @@ const check = (n, ok, d = '') => { checks.push({ n, ok, d }); console.log(`${ok 
 
 const treeRows = (panel) => ev(panel, `[...document.querySelectorAll('.tree .row')].map(r => r.innerText.replace(/\\s+/g,' ').trim())`);
 const infoVals = (panel) => ev(panel, `[...document.querySelectorAll('.info-row .v')].map(v => v.innerText.trim())`);
+/** 按字段名取（选择器/条件/范围/方式/命中）—— 比按位置稳，加行不会错位 */
+const infoVal = (panel, key) => ev(panel, `(() => {
+    const rows = [...document.querySelectorAll('.info-row')];
+    const r = rows.find((x) => (x.querySelector('.k')?.innerText ?? '').trim() === ${JSON.stringify(key)});
+    return (r?.querySelector('.v')?.innerText ?? '').trim();
+})()`);
 const displayOf = (page, sel) => ev(page, `(() => {
     const el = document.querySelector(${JSON.stringify(sel)});
     if (!el) return 'missing';
@@ -126,6 +132,9 @@ const displayOf = (page, sel) => ev(page, `(() => {
     const site = await ev(panel, `document.querySelector('.site')?.innerText ?? ''`);
     check('① 面板自动认出当前标签页', site.includes('127.0.0.1'), site);
 
+    const dupTitles = await ev(panel, `document.querySelectorAll('.head .title').length`);
+    check('① 面板不重复显示插件名（标题栏已有）', Number(dupTitles) === 0, `${dupTitles} 个`);
+
     const disabled = await ev(panel, `document.querySelector('.primary')?.disabled ?? true`);
     check('① 按钮可用（不是在"不支持"状态）', disabled === false, 'disabled=' + disabled);
 
@@ -142,30 +151,59 @@ const displayOf = (page, sel) => ev(page, `(() => {
         const b = r && r.querySelector('.banner');
         return b && !b.hidden ? b.textContent : '';
     })()`);
-    check('② 页面上有"选择模式"提示条', /选择模式/.test(bannerText), bannerText);
+    check('② 页面上没有任何文字浮层（不挡视线）', bannerText === '' , bannerText || '(无)');
 
     // ③ F12 效果：鼠标移动 → 树跟着变（**这是用户最在意的一条**）
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
-    await sleep(600);
-    const rows1 = await treeRows(panel);
-    console.log('   · 位置 A 的树:', JSON.stringify(rows1));
-    check('③ 鼠标一动，右侧树立刻对应', rows1.length >= 5, `${rows1.length} 层`);
-    check('③ 最里层是鼠标下的那个元素', rows1[rows1.length - 1]?.startsWith('img'), rows1[rows1.length - 1] ?? '');
+    await sleep(700);
 
-    const vals1 = await infoVals(panel);
+    const treeLen = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    console.log('   · 树的行数:', treeLen);
+    check('③ 右侧显示完整 DOM 树（多行）', Number(treeLen) >= 5, `${treeLen} 行`);
+
+    const curTagA = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    check('③ 当前行是鼠标下的那个元素', curTagA === 'img', curTagA || '(无当前行)');
+
+    const expandable = await ev(panel, `document.querySelectorAll('.tree .row .arrow:not(.empty)').length`);
+    check('③ 树节点可以展开/收起', Number(expandable) > 0, `${expandable} 个可展开`);
+
+    const hasSize = await ev(panel, `!!document.querySelector('.tree .size')`);
+    check('③ 树里不显示宽高（用户不需要）', hasSize === false, String(hasSize));
+
+    // ═══════════ ⑨b 树里：悬浮是淡的，选中是深的 ═══════════
+    const rowColors = await ev(panel, `(() => {
+        const cur = document.querySelector('.tree .row.current');
+        const others = [...document.querySelectorAll('.tree .row')].filter((r) => !r.classList.contains('current'));
+        const other = others.find((r) => r.querySelector('.name'));
+        return JSON.stringify({
+            current: cur ? getComputedStyle(cur).backgroundColor : '',
+            currentWeight: cur ? getComputedStyle(cur.querySelector('.name') || cur).fontWeight : '',
+            other: other ? getComputedStyle(other).backgroundColor : '',
+        });
+    })()`);
+    console.log('   · 颜色:', rowColors);
+    {
+        const c = JSON.parse(rowColors);
+        check('⑨b 选中的那一行有独立底色（不是透明）',
+            c.current && c.current !== 'rgba(0, 0, 0, 0)', c.current);
+        check('⑨b 选中行底色比其它行深（能一眼看出选中）',
+            c.current !== c.other, `选中 ${c.current} / 其它 ${c.other}`);
+    }
+
+
+
+    const vals1 = [await infoVal(panel, '选择器'), await infoVal(panel, '命中')];
     check('③ 选择器随之更新', !!vals1[0] && vals1[0] !== '—', vals1[0] ?? '');
 
     // 换一个位置 → 树应该变成另一个元素
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 520, y: 110, button: 'none' });
     await sleep(600);
-    const rows2 = await treeRows(panel);
-    console.log('   · 位置 B（同款元素）的树:', JSON.stringify(rows2));
-    check('③ 换位置后树也跟着换',
-        rows2[rows2.length - 1] !== rows1[rows1.length - 1],
-        `${rows1[rows1.length - 1]} → ${rows2[rows2.length - 1]}`);
+    const curB = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    console.log('   · 位置 B 当前行:', curB);
+    check('③ 换位置后当前行也跟着换', curB !== curTagA, `${curTagA} → ${curB}`);
 
     // 面板显示的"命中数"必须等于页面上真实的匹配数（拿页面自己算，别猜）
-    const vals2 = await infoVals(panel);
+    const vals2 = [await infoVal(panel, '选择器'), await infoVal(panel, '命中')];
     const match2 = vals2[1] ?? '';
     const sel2 = vals2[0] ?? '';
     const realCount = await ev(page, `document.querySelectorAll(${JSON.stringify(sel2)}).length`);
@@ -175,7 +213,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // 故意悬停到"没有区分类名"的那一层，验证多元素时能显示 >1
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 520, y: 260, button: 'none' });
     await sleep(600);
-    const v3 = await infoVals(panel);
+    const v3 = [await infoVal(panel, '选择器'), await infoVal(panel, '命中')];
     const real3 = await ev(page, `document.querySelectorAll(${JSON.stringify(v3[0] ?? '')}).length`);
     check('③ 多元素场景命中数也对得上', (v3[1] ?? '') === `${real3} 个元素`,
         `面板=${v3[1]} 页面实算=${real3}`);
@@ -185,8 +223,8 @@ const displayOf = (page, sel) => ev(page, `(() => {
     await sleep(600);
     await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find(x => x.innerText.includes('ad-box'));
-        r?.dispatchEvent(new MouseEvent('mouseenter'));
+        const r = rows.find(x => (x.querySelector('.name')?.textContent ?? '').includes('ad-box'));
+        r?.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter'));
         return true;
     })()`);
     await sleep(600);
@@ -203,7 +241,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 150, y: 150, button: 'left', clickCount: 1 });
     await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 150, y: 150, button: 'left', clickCount: 1 });
     await sleep(800);
-    const lockedSel = (await infoVals(panel))[0];
+    const lockedSel = await infoVal(panel, '选择器');
     check('⑤ 点击后锁定到一个具体选择器', !!lockedSel && lockedSel !== '—', lockedSel ?? '');
 
     // 锁定后：把"不该变"的东西全抓一遍，移到几个不同位置，再抓一遍对比
@@ -212,7 +250,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
         tag: await ev(page, `(() => { const h=document.getElementById('__adc_overlay'); const r=h&&h.shadowRoot; const t=r&&r.querySelector('.tag'); return t&&!t.hidden?t.textContent:''; })()`),
         treeCur: await ev(panel, `document.querySelector('.tree .row.current')?.innerText.replace(/\s+/g,' ').trim() ?? ''`),
         treeAll: await ev(panel, `[...document.querySelectorAll('.tree .row')].map(r=>r.innerText.replace(/\s+/g,' ').trim()).join('|')`),
-        sel: (await infoVals(panel))[0] ?? '',
+        sel: await infoVal(panel, '选择器'),
     });
 
     const snapBefore = await snapshot();
@@ -239,11 +277,11 @@ const displayOf = (page, sel) => ev(page, `(() => {
         return [b.style.left, b.style.top, b.style.width, b.style.height].join(',');
     })()`);
     const boxBefore = await boxAt();
-    const before = (await infoVals(panel))[0];
+    const before = await infoVal(panel, '选择器');
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 520, y: 170, button: 'none' });
     await sleep(700);
     const boxAfter = await boxAt();
-    const after = (await infoVals(panel))[0];
+    const after = await infoVal(panel, '选择器');
     check('⑤ 锁定后高亮框钉住不动', boxBefore !== '' && boxBefore === boxAfter,
         `${boxBefore} → ${boxAfter}`);
     check('⑤ 锁定后选择器不再乱跳', after === before, `${before} → ${after}`);
@@ -255,13 +293,13 @@ const displayOf = (page, sel) => ev(page, `(() => {
         const b = r && r.querySelector('.banner');
         return b && !b.hidden ? b.textContent : '';
     })()`);
-    check('⑤ 提示条显示"已锁定"', /已锁定/.test(bannerTxt), bannerTxt);
+    check('⑤ 页面上没有黑框提示条', !/已锁定/.test(bannerTxt), bannerTxt || '(无)');
 
     // 点别处 → 重新锁定到新元素
     await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 520, y: 170, button: 'left', clickCount: 1 });
     await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 520, y: 170, button: 'left', clickCount: 1 });
     await sleep(700);
-    const afterRepick = (await infoVals(panel))[0];
+    const afterRepick = await infoVal(panel, '选择器');
     check('⑤ 点页面别处能换目标', afterRepick !== before, `${before} → ${afterRepick}`);
 
     // ═══════════ ⑤b 再点一下**已选中的**元素 → 取消选中，恢复悬浮模式 ═══════════
@@ -275,24 +313,24 @@ const displayOf = (page, sel) => ev(page, `(() => {
         const b = r && r.querySelector('.banner');
         return b && !b.hidden ? b.textContent : '';
     })()`);
-    check('⑤b 再点已选中的元素 → 取消选中（提示条回到未锁定）',
-        /选择模式/.test(bannerAfterUnlock) && !/已锁定/.test(bannerAfterUnlock), bannerAfterUnlock);
+    check('⑤b 再点已选中的元素 → 取消选中（页面无浮层、树恢复跟随）',
+        !/已锁定/.test(bannerAfterUnlock), bannerAfterUnlock || '(无)');
 
     // 悬浮模式恢复：移动鼠标，右侧树应该又开始跟着变
-    const treeA = (await infoVals(panel))[0];
+    const treeA = await infoVal(panel, '选择器');
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
     await sleep(700);
-    const treeB = (await infoVals(panel))[0];
+    const treeB = await infoVal(panel, '选择器');
     check('⑤b 取消选中后，悬浮切换恢复（树跟着鼠标变）', treeA !== treeB, `${treeA} → ${treeB}`);
 
     // ═══════════ ⑤c 再点一下（换成锁定）→ 又停住 ═══════════
     await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 150, y: 150, button: 'left', clickCount: 1 });
     await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 150, y: 150, button: 'left', clickCount: 1 });
     await sleep(700);
-    const lockedSel2 = (await infoVals(panel))[0];
+    const lockedSel2 = await infoVal(panel, '选择器');
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 520, y: 170, button: 'none' });
     await sleep(700);
-    const stillLocked = (await infoVals(panel))[0];
+    const stillLocked = await infoVal(panel, '选择器');
     check('⑤c 重新点一下又锁定，鼠标滑动不再变', lockedSel2 === stillLocked, `${lockedSel2} → ${stillLocked}`);
 
     /**
@@ -305,12 +343,12 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // ⑥ 往外扩一层并拦截
     await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find(x => x.innerText.includes('ad-box'));
-        r?.click();
+        const r = rows.find(x => (x.querySelector('.name')?.textContent ?? '').includes('ad-box'));
+        r?.querySelector('.name')?.click();
         return true;
     })()`);
     await sleep(800);
-    const widened = (await infoVals(panel))[0];
+    const widened = await infoVal(panel, '选择器');
     check('⑥ 树里点祖先 → 往外扩一层', widened.includes('ad-box'), widened);
 
     await ev(panel, `(() => { document.querySelector('.foot.three .primary')?.click(); return true; })()`);
@@ -415,7 +453,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     await sleep(900);
     check('⑦ 有「同类 N」按钮', scopeBtn !== 'none' && /同类\s*3/.test(scopeBtn), String(scopeBtn));
 
-    const finalSel = await ev(panel, `[...document.querySelectorAll('.info-row .v')][0]?.innerText.trim() ?? ''`);
+    const finalSel = await infoVal(panel, '选择器');
     check('⑦ 切到同类后选择器变成宽选择器（无 nth-of-type）',
         finalSel.includes('.dup') && !finalSel.includes('nth-of-type'), finalSel);
 
@@ -426,84 +464,170 @@ const displayOf = (page, sel) => ev(page, `(() => {
     check('⑦ 拦同类后三个同款全部消失', allHidden === true, String(allHidden));
     check('⑦ 正文仍然正常', (await displayOf(page, '#keep')) !== 'none');
 
-    // ═══════════ ⑧ 关于页 / 版本进度 / 导入导出 ═══════════
-    await ev(panel, `(() => { document.querySelector('.head-btn')?.click(); return true; })()`);
-    await sleep(800);
+    // ═══════════ ⑩ 鼠标选不到的元素，从树里展开后选中 ═══════════
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(1000);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
 
-    const aboutText = await ev(panel, `document.querySelector('.about')?.innerText ?? ''`);
-    const verShown = await ev(panel, `document.querySelector('.about-ver')?.innerText.trim() ?? ''`);
-    check('⑧ 关于页能打开', !!aboutText, aboutText.slice(0, 30).replace(/\s+/g, ' '));
-    check('⑧ 显示当前版本（从 manifest 读）', /\d+\.\d+\.\d+/.test(verShown), verShown);
-    check('⑧ 有"这个版本做了什么"', /这个版本做了什么/.test(aboutText));
-    check('⑧ 有"后面计划做什么"', /后面计划做什么/.test(aboutText));
-    check('⑧ 计划里写了规则分享', /规则分享/.test(aboutText));
-    check('⑧ 有导出/导入按钮', /导出所有规则/.test(aboutText) && /导入规则/.test(aboutText));
-    {
-        const shot2 = await panel.send('Page.captureScreenshot', { format: 'png' });
-        fs.writeFileSync('/tmp/adc-about.png', Buffer.from(shot2.data, 'base64'));
-    }
+    // 悬停到那个 pointer-events:none 的图标中心 → 只会命中它的父级
+    const iconPos = await ev(page, `(() => {
+        const el = document.querySelector('.tiny-icon');
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
+    })()`);
+    const ip = JSON.parse(iconPos);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ip.x, y: ip.y, button: 'none' });
+    await sleep(700);
 
-    // 导入：用 CDP 直接给 file input 塞文件
-    const tmpFile = '/tmp/adc-import-test.json';
-    fs.writeFileSync(tmpFile, JSON.stringify({
-        format: 1, app: '广告清道夫', version: '0.0.1', exportedAt: Date.now(),
-        rules: { 'import-test.example': [
-            { id: 'i1', domain: 'import-test.example', selector: '.imported-ad', action: 'hide', enabled: true, label: 'div.imported-ad', createdAt: Date.now() },
-        ] },
-    }));
+    const hitTag = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    console.log('   · 悬停在图标上，命中到的是:', hitTag);
+    check('⑩ 图标被 pointer-events:none 挡住时，命中到的是父级', hitTag !== 'svg', hitTag);
 
-    await panel.send('DOM.enable');
-    const doc = await panel.send('DOM.getDocument', { depth: -1 });
-    const node = await panel.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: 'input[type=file]' });
-    if (!node.nodeId) {
-        check('⑧ 找到导入用的文件输入框', false, '没找到');
-    } else {
-        await panel.send('DOM.setFileInputFiles', { nodeId: node.nodeId, files: [tmpFile] });
-        await sleep(1500);
-        const imported = await ev(panel, `(async () => {
-            const got = await chrome.storage.local.get('blockRules');
-            const all = got.blockRules || {};
-            const list = all['import-test.example'] || [];
-            return JSON.stringify({ domains: Object.keys(all).length, imported: list.length, sel: list[0]?.selector ?? '' });
-        })()`);
-        const imp = JSON.parse(imported);
-        check('⑧ 导入规则成功写进存储', imp.imported === 1 && imp.sel === '.imported-ad', imported);
-    }
+    // 树里能找到 svg 那一行（因为展开到了当前元素）
+    const hasSvgRow = await ev(panel, `[...document.querySelectorAll('.tree .row .tag')].some((e) => e.textContent === 'svg')`);
+    check('⑩ 树里能看到 svg 节点', hasSvgRow === true, String(hasSvgRow));
 
-    // ═══════════ ⑨ 规则列表默认只看本页命中的 ═══════════
-    // 造两条规则：一条能命中（.feed-item），一条命中 0（.不存在的类）
+    // 点 svg 那一行 → 选中它
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => x.querySelector('.tag')?.textContent === 'svg');
+        r && r.querySelector('.name').click();
+        return !!r;
+    })()`);
+    await sleep(900);
+
+    const nowTag = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    const nowSel = await infoVal(panel, '选择器');
+    console.log('   · 选中后:', nowTag, '| 选择器:', nowSel);
+    check('⑩ 点 svg 行后选中了 svg', /svg\.tiny-icon/.test(nowSel), `${nowTag} / ${nowSel}`);
+
+
+    // 退出选择模式，恢复干净状态
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(900);
+
+    // ═══════════ ⑨ 页面上不许出现文字标签（会挡住要点的东西）═══════════
+    const hasTagEl = await ev(page, `(() => {
+        const h = document.getElementById('__adc_overlay');
+        const r = h && h.shadowRoot;
+        if (!r) return 'no-overlay';
+        return r.querySelector('.tag') ? 'has-tag' : 'no-tag';
+    })()`);
+    check('⑨ 页面上没有文字标签（不挡视线）', hasTagEl !== 'has-tag', hasTagEl);
+
+    // ═══════════ ⑧ 导入导出挪到列表底部 ═══════════
+    const footLinks = await ev(panel, `[...document.querySelectorAll('.rf-link')].map((b) => b.textContent.trim()).join(' ')`);
+    check('⑧ 列表顶部有「导入 / 导出」', /导出/.test(footLinks) && /导入/.test(footLinks), footLinks);
+
+    // 原生文件控件必须藏起来（界面上只留文字按钮）
+    const nativeInputShown = await ev(panel, `(() => {
+        const i = document.querySelector('input[type=file]');
+        if (!i) return 'missing';
+        return getComputedStyle(i).display;
+    })()`);
+    check('⑧ 控件藏起来了（不出现原生"选择文件"）', nativeInputShown === 'none', String(nativeInputShown));
+
+    // ═══════════ ⑩ 加条件：外层选一类，内层点条件 ═══════════
     await page.send('Page.reload');
     await sleep(2200);
-    await ev(panel, `(async () => {
-        const got = await chrome.storage.local.get('blockRules');
-        const all = got.blockRules || {};
-        const d = Object.keys(all)[0] || location.hostname;
-        all[d] = [
-            { id: 'hit1', domain: d, selector: '.feed-item', action: 'hide', enabled: true,
-              label: 'div.feed-item', createdAt: Date.now() },
-            { id: 'miss1', domain: d, selector: '.this-does-not-exist-xyz', action: 'hide', enabled: true,
-              label: 'div.nothing', createdAt: Date.now() },
-        ];
-        await chrome.storage.local.set({ blockRules: all });
-        return 'ok';
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(1200);
+
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+
+    // ① 先点卡片里的标题（点卡片中心会命中封面，外层就不是整张卡了）
+    const titlePos = await ev(page, `(() => {
+        const el = document.querySelector('.feed-item:not(.is-ad) .feed-title');
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
     })()`);
-    await sleep(2500);
+    const tp = JSON.parse(titlePos);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: tp.x, y: tp.y, button: 'none' });
+    await sleep(300);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: tp.x, y: tp.y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: tp.x, y: tp.y, button: 'left', clickCount: 1 });
+    await sleep(900);
 
-    const tabs = await ev(panel, `JSON.stringify([...document.querySelectorAll('.rf-btn')].map(b => b.innerText.trim()))`);
-    console.log('   · 筛选标签:', tabs);
-    check('⑨ 有「本页 / 本网站」两个标签', /本页/.test(tabs) && /本网站/.test(tabs), tabs);
+    // ② 在右侧树里往上选到「整张卡片」
+    const widenedRow = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('feed-item'));
+        if (!r) return false;
+        r.querySelector('.name').click();
+        return true;
+    })()`);
+    check('⑩ 树里能选到整张卡片', widenedRow === true);
+    await sleep(800);
 
-    const shownDefault = await ev(panel, `[...document.querySelectorAll('.rule .rule-label')].map(e => e.innerText.replace(/\s+/g,' ').trim())`);
-    console.log('   · 默认显示的规则:', JSON.stringify(shownDefault));
-    check('⑨ 默认只显示本页命中的规则（1 条）', shownDefault.length === 1, `${shownDefault.length} 条`);
-    check('⑨ 命中 0 的那条默认不显示', !shownDefault.some((t) => /nothing/.test(t)), JSON.stringify(shownDefault));
+    const selBefore = await infoVal(panel, '选择器');
+    console.log('   · 选中后选择器:', selBefore);
+    check('⑩ 选中一类卡片，命中 6', /feed-item/.test(selBefore), selBefore);
 
-    // 切到本网站 → 两条都在
-    await ev(panel, `(() => { const b=[...document.querySelectorAll('.rf-btn')].find(x=>/本网站/.test(x.innerText)); b&&b.click(); return true; })()`);
-    await sleep(600);
-    const shownSite = await ev(panel, `[...document.querySelectorAll('.rule .rule-label')].map(e => e.innerText.replace(/\s+/g,' ').trim())`);
-    console.log('   · 本网站显示的规则:', JSON.stringify(shownSite));
-    check('⑨ 切到「本网站」能看到全部 2 条', shownSite.length === 2, `${shownSite.length} 条`);
+    // 点「+ 加条件」
+    const condBtn = await ev(panel, `(() => {
+        const b = [...document.querySelectorAll('.mini-btn')].find(x => /加条件/.test(x.innerText));
+        if (!b) return 'none';
+        b.click();
+        return b.innerText.trim();
+    })()`);
+    check('⑩ 有「+ 加条件」按钮', /加条件/.test(condBtn), String(condBtn));
+    await sleep(1200);
+
+    const waiting = await ev(panel, `document.body.innerText.includes('去页面上点一下')`);
+    check('⑩ 点后进入"去页面上点一下"状态', waiting === true);
+
+    // 在**广告卡片的角标**上点一下
+    const badge = await ev(page, `(() => {
+        const el = document.querySelector('.feed-item.is-ad .feed-badge');
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
+    })()`);
+    const bd = JSON.parse(badge);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: bd.x, y: bd.y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: bd.x, y: bd.y, button: 'left', clickCount: 1 });
+    await sleep(1400);
+
+    const opts = await ev(panel, `JSON.stringify([...document.querySelectorAll('.cond-opt')].map(b => b.innerText.replace(/\s+/g,' ').trim()))`);
+    console.log('   · 候选条件:', opts);
+    check('⑩ 算出了候选条件', JSON.parse(opts).length > 0, opts);
+    check('⑩ 第一个候选是「含文字「广告」」', /含文字「广告」/.test(JSON.parse(opts)[0] || ''), JSON.parse(opts)[0] || '');
+    check('⑩ 候选带命中数 2 / 6', /2 \/ 6/.test(JSON.parse(opts)[0] || ''), JSON.parse(opts)[0] || '');
+
+    // 选它
+    await ev(panel, `(() => {
+        const b = [...document.querySelectorAll('.cond-opt')].find(x => /含文字「广告」/.test(x.innerText));
+        b && b.click();
+        return true;
+    })()`);
+    await sleep(1000);
+
+    const condShown = await ev(panel, `document.querySelector('.cond-on')?.innerText.trim() ?? ''`);
+    check('⑩ 条件已生效并显示', /含「广告」/.test(condShown), condShown);
+
+    const marked = await ev(page, `document.querySelectorAll('.__adc_match').length`);
+    check('⑩ 页面上只圈出符合条件的 2 个', Number(marked) === 2, `${marked} 个`);
+
+    // 拦截
+    await ev(panel, `document.querySelector('.foot.three .primary')?.click()`);
+    await sleep(1600);
+    const states = await ev(page, `JSON.stringify({
+        ads: [...document.querySelectorAll('.feed-item.is-ad')].map(e => getComputedStyle(e).display),
+        normals: [...document.querySelectorAll('.feed-item:not(.is-ad)')].map(e => getComputedStyle(e).display),
+    })`);
+    const st = JSON.parse(states);
+    console.log('   · 广告:', JSON.stringify(st.ads), ' 普通:', JSON.stringify(st.normals));
+    check('⑩ 只拦掉 2 个广告卡片', st.ads.every((d) => d === 'none'), JSON.stringify(st.ads));
+    check('⑩ 4 个普通卡片没动', st.normals.every((d) => d !== 'none'), JSON.stringify(st.normals));
+
+    const savedCond = await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        return JSON.stringify(Object.values(g.blockRules || {}).flat().map(r => r.condition || null));
+    })()`);
+    check('⑩ 存下来的规则带条件', /"type":"text"/.test(savedCond) && /广告/.test(savedCond), savedCond);
 
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);

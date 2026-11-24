@@ -1,6 +1,6 @@
 import { buildHideCss, loadRulesFor, loadSettings } from '@/utils/rules';
 import { ancestorChain, buildBroadSelector, buildSelector, countMatches, describeElement } from '@/utils/selector';
-import type { BlockRule, ElementInfo, Settings } from '@/utils/types';
+import type { BlockRule, ElementInfo, RuleCondition, Settings } from '@/utils/types';
 
 /**
  * 页面侧的「选择器 + 规则执行器」。
@@ -29,6 +29,8 @@ function ctxAlive(): boolean {
 }
 
 const STYLE_ID = '__adc_style';
+/** 条件规则命中后打的类（CSS 里 display:none） */
+const BLOCKED_CLASS = '__adc_blocked';
 const OUTLINE_CLASS = '__adc_outline';
 
 let rules: BlockRule[] = [];
@@ -50,6 +52,11 @@ let locked = false;
 let lastHovered: Element | null = null;
 let chain: Element[] = [];
 let currentIndex = -1;
+/** 正在"点一下条件"模式：下一次点击用来选条件，而不是选外层 */
+let condPicking = false;
+/** 这次要给哪个选择器加条件 */
+let condOuterSelector = '';
+
 /** 预览时被排除在隐藏规则之外的选择器 */
 let previewExclude: string | null = null;
 
@@ -88,8 +95,48 @@ function rewriteStyle(): void {
         `\n.${OUTLINE_CLASS}.${OUTLINE_CLASS}{outline:2px dashed #f53f3f !important;outline-offset:-2px !important;` +
         `background:rgba(245,63,63,.10) !important;}\n` +
         /** 同类元素：淡一点的虚线，和"当前这一个"区分开 */
-        `.__adc_match.__adc_match{outline:2px dashed rgba(0,174,236,.85) !important;outline-offset:-2px !important;` +
-        `background:rgba(0,174,236,.07) !important;}\n`;
+        // 同类元素：细虚线、不加底色 —— 只做"提示还有几个"，别糊住页面
+        `.__adc_match.__adc_match{outline:1px dashed rgba(0,174,236,.55) !important;outline-offset:-1px !important;}\n` +
+        `\n.${BLOCKED_CLASS}.${BLOCKED_CLASS}{display:none !important}\n`;
+}
+
+/** 元素是否满足条件。 */
+function meetsCondition(el: Element, c: RuleCondition): boolean {
+    if (c.type === 'text') {
+        const txt = (el as HTMLElement).innerText ?? el.textContent ?? '';
+        return txt.includes(c.value);
+    }
+    try {
+        return !!el.querySelector(c.value);
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 执行「带条件」的规则。
+ *
+ * ⚠️ 为什么不能只靠 CSS：CSS 没法表达"这个元素内部包含「广告」两个字"，
+ *    所以只能 JS 逐个判断，命中的打上 `__adc_blocked`（样式里 display:none）。
+ */
+function applyConditionalRules(): void {
+    const list = rules.filter((r) => r.enabled && r.condition);
+    document.querySelectorAll(`.${BLOCKED_CLASS}`).forEach((el) => el.classList.remove(BLOCKED_CLASS));
+    if (list.length === 0) return;
+
+    for (const r of list) {
+        let targets: Element[] = [];
+        try {
+            targets = Array.from(document.querySelectorAll(r.selector));
+        } catch {
+            continue;
+        }
+        for (const el of targets) {
+            if (!meetsCondition(el, r.condition!)) continue;
+            if (r.action === 'remove') el.remove();
+            else el.classList.add(BLOCKED_CLASS);
+        }
+    }
 }
 
 /** 执行「删除」类规则（这些没法用 CSS 做，只能真删）。 */
@@ -106,6 +153,7 @@ function applyRemovals(): void {
 function applyAll(): void {
     rewriteStyle();
     applyRemovals();
+    applyConditionalRules();
 }
 
 /** 页面是单页应用，节点会不断重挂 —— 用观察器兜住「删除」类规则。 */
@@ -114,13 +162,15 @@ let removeTimer: number | null = null;
 
 function watchRemovals(): void {
     if (removeObserver) return;
-    const hasRemoveRule = () => rules.some((r) => r.enabled && r.action === 'remove');
+    const hasRemoveRule = () =>
+        rules.some((r) => r.enabled && (r.action === 'remove' || !!r.condition));
     removeObserver = new MutationObserver(() => {
         if (!hasRemoveRule()) return;
         if (removeTimer != null) return;
         removeTimer = window.setTimeout(() => {
             removeTimer = null;
             applyRemovals();
+            applyConditionalRules();
         }, 200);
     });
     const start = () => {
@@ -134,8 +184,6 @@ function watchRemovals(): void {
 
 let host: HTMLElement | null = null;
 let box: HTMLElement | null = null;
-let tag: HTMLElement | null = null;
-let banner: HTMLElement | null = null;
 
 function ensureOverlay(): void {
     if (host && host.isConnected) return;
@@ -152,35 +200,15 @@ function ensureOverlay(): void {
                 border: 2px solid #00aeec; background: rgba(0, 174, 236, .14);
                 border-radius: 2px; transition: none;
             }
-            .banner {
-                position: fixed; left: 50%; top: 12px; transform: translateX(-50%);
-                pointer-events: none; box-sizing: border-box;
-                font: 12.5px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
-                background: rgba(0, 0, 0, .82); color: #fff; padding: 8px 16px;
-                border-radius: 18px; white-space: nowrap; max-width: 90vw;
-                overflow: hidden; text-overflow: ellipsis;
-                box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
-            }
-            .tag {
-                position: fixed; pointer-events: none; box-sizing: border-box;
-                font: 11px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                background: #00aeec; color: #fff; padding: 2px 6px; border-radius: 3px;
-                white-space: nowrap; max-width: 60vw; overflow: hidden; text-overflow: ellipsis;
-            }
         </style>
-        <div class="banner" hidden></div>
         <div class="box" hidden></div>
-        <div class="tag" hidden></div>
     `;
     box = root.querySelector('.box');
-    tag = root.querySelector('.tag');
-    banner = root.querySelector('.banner');
     document.documentElement.appendChild(host);
 }
 
 function hideOverlay(): void {
     if (box) box.hidden = true;
-    if (tag) tag.hidden = true;
 }
 
 function paint(el: Element | null): void {
@@ -197,20 +225,11 @@ function paint(el: Element | null): void {
         box.style.width = Math.max(r.width, 2) + 'px';
         box.style.height = Math.max(r.height, 2) + 'px';
     }
-    if (tag) {
-        const name = el.tagName.toLowerCase();
-        const cls = Array.from(el.classList)
-            .filter((c) => !c.startsWith('__adc_'))
-            .slice(0, 2)
-            .join('.');
-        const label = (cls ? `${name}.${cls}` : name) +
-            `  ${Math.round(r.width)}×${Math.round(r.height)}`;
-        tag.hidden = false;
-        tag.textContent = label;
-        const top = r.top > 22 ? r.top - 20 : r.top + 2;
-        tag.style.left = Math.max(r.left, 0) + 'px';
-        tag.style.top = top + 'px';
-    }
+    /**
+     * 页面上**不再显示那个文字标签**（`span.trigger-text 42×22` 之类）。
+     * 用户反馈：它正好盖在要点的东西上，挡着选。
+     * 这些信息面板里都有（DOM 树 + 选择器），页面上只需要一个框。
+     */
 }
 
 /** 当前被标成"同类"的元素 */
@@ -259,6 +278,106 @@ function clearMatches(): void {
     lastMatchSelector = '';
 }
 
+// ───────────────────────── DOM 树（F12 那种） ─────────────────────────
+
+/** 已展开的节点（按路径字符串，如 "1/3/0"） */
+const expandedPaths = new Set<string>();
+/** 当前选中元素的路径 */
+let currentPathKey = '';
+
+/** 元素在整棵树里的路径（每层是它在父元素 children 里的下标） */
+function elementPath(el: Element): number[] | null {
+    const path: number[] = [];
+    let cur: Element | null = el;
+    while (cur && cur !== document.documentElement) {
+        const parent: Element | null = cur.parentElement;
+        if (!parent) return null;
+        path.unshift(Array.prototype.indexOf.call(parent.children, cur));
+        cur = parent;
+    }
+    return cur === document.documentElement ? path : null;
+}
+
+const keyOfPath = (p: number[]): string => p.join('/');
+const pathOfKey = (k: string): number[] => (k === '' ? [] : k.split('/').map(Number));
+
+function elementAtPath(p: number[]): Element | null {
+    let cur: Element = document.documentElement;
+    for (const idx of p) {
+        const next = cur.children[idx];
+        if (!next) return null;
+        cur = next;
+    }
+    return cur;
+}
+
+/** 展开到某个元素（所有祖先都展开），这样它在树里能露出来 */
+function expandTo(path: number[]): void {
+    for (let i = 0; i <= path.length; i++) expandedPaths.add(keyOfPath(path.slice(0, i)));
+}
+
+/** 树上的一个节点（扁平化之后的） */
+export interface TreeNodeInfo {
+    path: string;
+    depth: number;
+    tag: string;
+    id: string;
+    classes: string[];
+    hasChildren: boolean;
+    expanded: boolean;
+    current: boolean;
+}
+
+/** 最多序列化多少节点（大页面别把面板撑爆） */
+const MAX_TREE_NODES = 400;
+
+/** 按当前展开状态，把 DOM 拍平成一串节点 */
+function buildTree(): TreeNodeInfo[] {
+    const out: TreeNodeInfo[] = [];
+    const walk = (el: Element, path: number[]) => {
+        if (out.length >= MAX_TREE_NODES) return;
+        // 跳过我们自己插进去的浮层（它挂在 documentElement 下，不该出现在用户的页面树里）
+        if (el.id.startsWith('__adc_')) return;
+        const key = keyOfPath(path);
+        const isOpen = expandedPaths.has(key);
+        out.push({
+            path: key,
+            depth: path.length,
+            tag: el.tagName.toLowerCase(),
+            id: el.id || '',
+            classes: Array.from(el.classList)
+                .filter((c) => !c.startsWith('__adc_'))
+                .slice(0, 3),
+            hasChildren: el.children.length > 0,
+            expanded: isOpen,
+            current: key === currentPathKey,
+        });
+        if (!isOpen) return;
+        Array.from(el.children).forEach((child, i) => walk(child, [...path, i]));
+    };
+    walk(document.documentElement, []);
+    return out;
+}
+
+/** 展开 / 收起某个节点 */
+function togglePath(key: string): void {
+    if (expandedPaths.has(key)) expandedPaths.delete(key);
+    else expandedPaths.add(key);
+    notifyPanel();
+}
+
+/** 选中树里的某个节点 */
+function selectPath(key: string): void {
+    const el = elementAtPath(pathOfKey(key));
+    if (el) setSelected(el);
+}
+
+/** 悬停树里的某个节点 → 页面上高亮它 */
+function highlightPath(key: string): void {
+    const el = elementAtPath(pathOfKey(key));
+    if (el) paint(el);
+}
+
 // ───────────────────────── 选择逻辑 ─────────────────────────
 
 function chainInfo(): ElementInfo[] {
@@ -295,6 +414,8 @@ function currentState() {
         broadSelector: broad,
         /** 同类元素有几个 */
         broadCount: broad ? countMatches(broad) : 0,
+        tree: buildTree(),
+        currentPath: currentPathKey,
     };
 }
 
@@ -329,7 +450,6 @@ function updateFollowBox(): void {
 function setSelected(el: Element, opts: { repaint?: boolean } = {}): void {
     if (isPreviewing()) revertPreview();
     locked = true;
-    updateBanner();
     showMatches(buildBroadSelector(el));
     chain = ancestorChain(el);
     currentIndex = chain.length - 1;
@@ -345,7 +465,6 @@ function selectAncestor(index: number): void {
     const el = currentEl();
     paint(el);
     if (el) showMatches(buildBroadSelector(el));
-    updateBanner();
     notifyPanel();
 }
 
@@ -363,27 +482,13 @@ function startPicker(): void {
     window.addEventListener('scroll', onScrollResize, true);
     window.addEventListener('resize', onScrollResize, true);
     ensureOverlay();
-    updateBanner();
     notifyPanel();
-}
-
-/** 提示条文案随"锁定"状态变化，让用户一眼知道现在是什么阶段 */
-function updateBanner(): void {
-    if (!banner) return;
-    banner.hidden = !picking;
-    if (!picking) return;
-    if (isPreviewing()) {
-        banner.textContent = '预览中 · 这就是拦掉之后的样子 · 再点「退出预览」恢复';
-        return;
-    }
-    banner.textContent = locked
-        ? '已锁定 · 点页面别处可换目标 · 在右侧树里点上级可往外套 · Esc 退出'
-        : '选择模式 · 移动鼠标定位 · 点一下锁定 · Esc 退出';
 }
 
 function stopPicker(): void {
     if (!picking) return;
     picking = false;
+    condPicking = false;
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('click', onClick, true);
@@ -393,7 +498,6 @@ function stopPicker(): void {
     revertPreview();
     hideOverlay();
     clearMatches();
-    if (banner) banner.hidden = true;
     followBox?.remove();
     followBox = null;
     chrome.runtime.sendMessage({ type: 'adc:pickerEnded' }).catch(() => {});
@@ -425,8 +529,14 @@ function onMove(e: MouseEvent): void {
     showMatches(buildBroadSelector(el));
 
     // 还没锁定 → 右侧树跟着鼠标走（F12 的实时对应）
+    // 要**自动展开到鼠标下这个元素**，否则它藏在折叠节点里看不见
     chain = ancestorChain(el);
     currentIndex = chain.length - 1;
+    const p = elementPath(el);
+    if (p) {
+        currentPathKey = keyOfPath(p);
+        expandTo(p);
+    }
     notifyPanel();
 }
 
@@ -455,7 +565,6 @@ function unlockSelection(): void {
         paint(el);
         showMatches(buildBroadSelector(el));
     }
-    updateBanner();
     notifyPanel();
 }
 
@@ -464,6 +573,20 @@ function onClick(e: MouseEvent): void {
     e.stopImmediatePropagation();
     const el = hitTest(e.clientX, e.clientY);
     if (!el) return;
+
+    /**
+     * 「加条件」模式：这次点击是在选"能区分广告的东西"，
+     * 不是选外层，所以不能走下面的锁定逻辑。
+     */
+    if (condPicking) {
+        condPicking = false;
+        const result = computeCondCandidates(el, condOuterSelector);
+        chrome.runtime
+            .sendMessage({ type: 'adc:condPicked', ...result })
+            .catch(() => { /* 面板没开就算了 */ });
+        hideOverlay();
+            return;
+    }
 
     /**
      * 已经选中了某个元素，而这次点的**还是它（或它内部）** → 取消选中。
@@ -544,7 +667,6 @@ function applyPreview(selector: string, action: string): number {
     // 预览时把"圈出来"的标记全撤掉 —— 用户要看的是真实效果，不是示意图
     clearMatches();
     hideOverlay();
-    updateBanner();
 
     if (action === 'remove') {
         // 删除模式：真摘掉，并记住原位
@@ -589,11 +711,116 @@ function revertPreview(): void {
     // 预览结束后把高亮框恢复回来
     const el = currentEl();
     if (el) paint(el);
-    updateBanner();
 }
 
 function isPreviewing(): boolean {
     return draft != null || removedForPreview.length > 0;
+}
+
+// ───────────────────────── 「加条件」 ─────────────────────────
+
+/** 一条候选条件 */
+interface CondCandidate {
+    type: 'text' | 'selector';
+    value: string;
+    count: number;
+}
+
+/**
+ * 用户点了内层那个"能区分的东西"之后，算出可以当条件的候选。
+ *
+ * 只保留"命中数 < 同类总数"的 —— 全都有的东西没有区分能力。
+ */
+function computeCondCandidates(inner: Element, outerSelector: string): {
+    total: number; candidates: CondCandidate[];
+} {
+    let all: Element[] = [];
+    try {
+        all = Array.from(document.querySelectorAll(outerSelector));
+    } catch {
+        return { total: 0, candidates: [] };
+    }
+    const total = all.length;
+    if (total === 0) return { total: 0, candidates: [] };
+
+    // 找到 inner 对应的那个外层（用于限定搜索范围）
+    let outer: Element | null = null;
+    for (let e: Element | null = inner; e; e = e.parentElement) {
+        try {
+            if (e.matches(outerSelector)) { outer = e; break; }
+        } catch { /* 忽略非法选择器 */ }
+    }
+    const scope = outer ?? inner.parentElement ?? inner;
+
+    // ── 文字候选：点中元素的文本，以及它内部所有短文本 ──
+    const texts = new Set<string>();
+    const pushText = (raw: string | null | undefined) => {
+        const t = (raw ?? '').replace(/\s+/g, ' ').trim();
+        if (t && t.length <= 12 && !/^[\d\s.,:：%+\-×xX/()（）·]+$/.test(t)) texts.add(t);
+    };
+    pushText((inner as HTMLElement).innerText);
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    let guard = 0;
+    while ((n = walker.nextNode()) && guard++ < 200) pushText(n.textContent);
+
+    // ── class 候选：点的元素 → 往上到外层为止 ──
+    const classes = new Set<string>();
+    for (let e: Element | null = inner; e; e = e.parentElement) {
+        e.classList.forEach((c) => { if (!c.startsWith('__adc_')) classes.add(c); });
+        if (e === scope) break;
+    }
+
+    const textCache = all.map((el) => (el as HTMLElement).innerText ?? el.textContent ?? '');
+    const candidates: CondCandidate[] = [];
+
+    for (const t of texts) {
+        const count = textCache.filter((x) => x.includes(t)).length;
+        if (count >= 1 && count < total) candidates.push({ type: 'text', value: t, count });
+    }
+    for (const c of classes) {
+        const sel = `.${CSS.escape(c)}`;
+        let count = 0;
+        for (const el of all) {
+            try { if (el.querySelector(sel)) count++; } catch { /* 忽略 */ }
+        }
+        if (count >= 1 && count < total) candidates.push({ type: 'selector', value: sel, count });
+    }
+
+    // 排序：文字优先（短的优先）→ class 按命中少的优先
+    candidates.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'text' ? -1 : 1;
+        if (a.type === 'text' && a.value.length !== b.value.length) return a.value.length - b.value.length;
+        return a.count - b.count;
+    });
+
+    return { total, candidates: candidates.slice(0, 8) };
+}
+
+/** 按条件标出"会被拦的那几个"。 */
+function markByCondition(selector: string, cond: RuleCondition): number {
+    clearMatches();
+    let list: Element[] = [];
+    try {
+        list = Array.from(document.querySelectorAll(selector));
+    } catch {
+        return 0;
+    }
+    let n = 0;
+    for (const el of list) {
+        if (!meetsCondition(el, cond)) continue;
+        el.classList.add('__adc_match');
+        matchedEls.push(el);
+        n++;
+    }
+    lastMatchSelector = '';
+    return n;
+}
+
+function startCondPick(selector: string): void {
+    if (!picking) startPicker();
+    condPicking = true;
+    condOuterSelector = selector;
 }
 
 // ───────────────────────── 启动 / 消息 ─────────────────────────
@@ -615,7 +842,7 @@ async function reloadRules(): Promise<void> {
         applyAll();
     } catch (e) {
         // 上下文失效 / 存储暂时不可用：静默，不要每 800ms 刷一条红字
-        console.debug('[广告清道夫] 读取规则失败（扩展可能已重载）', e);
+        console.debug('[广告拦截助手] 读取规则失败（扩展可能已重载）', e);
     }
 }
 
@@ -671,12 +898,40 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
             case 'adc:state':
                 sendResponse({ ok: true, ...currentState() });
                 return false;
+            case 'adc:startCondPick':
+                startCondPick(String(msg.selector ?? ''));
+                sendResponse({ ok: true });
+                return false;
+            case 'adc:markCondition': {
+                const n = markByCondition(
+                    String(msg.selector ?? ''),
+                    msg.condition as RuleCondition,
+                );
+                sendResponse({ ok: true, count: n });
+                return false;
+            }
+            case 'adc:clearCondition':
+                clearMatches();
+                sendResponse({ ok: true });
+                return false;
             case 'adc:startPicker':
                 startPicker();
                 sendResponse({ ok: true });
                 return false;
             case 'adc:stopPicker':
                 stopPicker();
+                sendResponse({ ok: true });
+                return false;
+            case 'adc:togglePath':
+                togglePath(String(msg.path ?? ''));
+                sendResponse({ ok: true });
+                return false;
+            case 'adc:selectPath':
+                selectPath(String(msg.path ?? ''));
+                sendResponse({ ok: true });
+                return false;
+            case 'adc:highlightPath':
+                highlightPath(String(msg.path ?? ''));
                 sendResponse({ ok: true });
                 return false;
             case 'adc:selectAncestor':

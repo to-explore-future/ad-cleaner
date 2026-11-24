@@ -1,4 +1,4 @@
-# 广告清道夫 · 需求文档
+# 广告拦截助手 · 需求文档
 
 > 这份文档是**唯一标准**。改任何代码之前先对照它；改完逐条回归。
 > 最后更新：0.0.1
@@ -61,6 +61,57 @@
 Esc / 取消 → 退出选择模式，页面恢复原样。
 
 ---
+
+
+## 组合标签规则（v0.2.0 · 待实现）
+
+**一句话**：用户选中多个标签 → 程序自动记下它们之间的**层级差** → 组成一条规则 → 匹配时逐层校验。
+
+### 数据
+
+```ts
+// BlockRule 新增
+parts?: { selector: string; relDepth: number }[];
+//  parts[0].relDepth 恒为 0（锚点），后面是"再往下几层"
+```
+
+例：用户在树上依次选了 LV2 / LV5 / LV6（V5 在 V2 下 3 层，V6 在 V5 下 1 层）
+
+```json
+{ "parts": [
+  { "selector": "div.feed-card",   "relDepth": 0 },
+  { "selector": "div.ad-wrap",     "relDepth": 3 },
+  { "selector": "span.ad-badge",   "relDepth": 1 }
+] }
+```
+
+### 匹配
+
+```
+对每个 el ∈ querySelectorAll(parts[0].selector)：
+  cur ← el
+  对 parts[1..] 的每一段 p：
+     在 cur 的"正好 p.relDepth 层"后代里找匹配 p.selector 的元素
+     —— 只有**层级正好对上**才算命中
+     找不到 → 这条规则在 el 上不命中
+  全部命中 → 拦 el
+```
+
+**关键**：层级差必须严格对上。V2 下第 3 层真实是 V5，规则写的是 V5 → 命中；
+如果真实页面那里变成了别的层（比如 V4），**不命中**。这是用户明确要的语义。
+
+### 交互
+
+1. 树里每个节点加一个 `＋` —— 点一下把它加入"当前组合"
+2. 面板下方列出已加入的标签：`LV2 div.feed-card → +3 层 → div.ad-wrap → +1 层 → span.ad-badge`
+3. 一个「组合成规则」按钮 → 存成一条 `parts` 规则
+4. 规则列表里显示成 `div.feed-card ▸3 div.ad-wrap ▸1 span.ad-badge`
+
+### 注意
+
+- 单标签规则照旧（`parts` 为空 → 走原来的 `selector` 逻辑），两条路并存
+- `parts` 规则一律走 JS 匹配（CSS 表达不了层级约束），命中后打 `__adc_blocked`
+- 树的展开状态和选择顺序要分开记：**顺序 = 层级顺序**（外层在前）
 
 ## 三、右侧（面板）交互
 

@@ -78,7 +78,8 @@ export async function saveSettings(s: Settings): Promise<void> {
  */
 export function buildHideCss(rules: BlockRule[], excludeSelector?: string): string {
     const sels = rules
-        .filter((r) => r.enabled && r.action === 'hide')
+        // 带条件的规则 CSS 表达不了（CSS 没有"包含文字"），交给页面脚本处理
+        .filter((r) => r.enabled && r.action === 'hide' && !r.condition)
         .map((r) => r.selector)
         .filter((s) => s && s !== excludeSelector);
     if (sels.length === 0) return '';
@@ -108,7 +109,7 @@ export async function exportAllRules(appVersion: string): Promise<string> {
     const all = await loadAllRules();
     const payload: RulesExport = {
         format: EXPORT_FORMAT,
-        app: '广告清道夫',
+        app: '广告拦截助手',
         version: appVersion,
         exportedAt: Date.now(),
         rules: all,
@@ -125,7 +126,7 @@ export async function exportAllRules(appVersion: string): Promise<string> {
 export async function importRules(text: string): Promise<{ added: number; updated: number; domains: number }> {
     const parsed = JSON.parse(text) as Partial<RulesExport>;
     if (!parsed || typeof parsed !== 'object' || !parsed.rules || typeof parsed.rules !== 'object') {
-        throw new Error('文件格式不对：不是广告清道夫的规则文件');
+        throw new Error('文件格式不对：不是广告拦截助手的规则文件');
     }
     if (parsed.format != null && parsed.format > EXPORT_FORMAT) {
         throw new Error('这个文件来自更新版本的扩展，请先升级');
@@ -163,4 +164,22 @@ export async function importRules(text: string): Promise<{ added: number; update
 
     await chrome.storage.local.set({ [RULES_KEY]: all });
     return { added, updated, domains: Object.keys(parsed.rules).length };
+}
+
+/** 规则的语法写法（给用户看，以后分享也用这个格式）。 */
+export function ruleToSyntax(rule: BlockRule): string {
+    const base = `${rule.domain}##${rule.selector}`;
+    if (!rule.condition) return base;
+    return rule.condition.type === 'text'
+        ? `${rule.selector}|text("${rule.condition.value}")`
+        : `${rule.selector}|has(${rule.condition.value})`;
+}
+
+/** 规则的一句话描述（列表里显示）。 */
+export function ruleToLabel(rule: BlockRule): string {
+    if (!rule.condition) return rule.label || rule.selector;
+    const what = rule.condition.type === 'text'
+        ? `含「${rule.condition.value}」`
+        : `含 ${rule.condition.value}`;
+    return `${rule.label || rule.selector} ${what}`;
 }

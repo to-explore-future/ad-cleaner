@@ -91,6 +91,13 @@ const ev = async (s, expr) => {
     return r.result.value;
 };
 
+/** 按字段名取面板里的值（选择器/条件/范围/方式/命中）—— 比按位置稳 */
+const infoVal = (panel, key) => ev(panel, `(() => {
+    const rows = [...document.querySelectorAll('.info-row')];
+    const r = rows.find((x) => (x.querySelector('.k')?.innerText ?? '').trim() === ${JSON.stringify(key)});
+    return (r?.querySelector('.v')?.innerText ?? '').trim();
+})()`);
+
 async function openTab(bg, windowId, url) {
     const { targetId } = await bg.send('Target.createTarget', { url, windowId, newWindow: false });
     let p = null;
@@ -218,9 +225,8 @@ const displayOf = (page, sel) => ev(page, `(() => {
     console.log('   · 悬停时的树:', JSON.stringify(hoverChain));
     check('③ 悬停页面时右侧树自动展开祖先链', hoverChain.length >= 5,
         `${hoverChain.length} 层`);
-    check('③ 最里层是 img（鼠标实际命中的）',
-        hoverChain.length > 0 && hoverChain[hoverChain.length - 1].startsWith('img'),
-        hoverChain[hoverChain.length - 1] ?? '');
+    const curTag = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    check('③ 当前行是 img（鼠标实际命中的）', curTag === 'img', curTag || '(无)');
 
     // ═══════════ ④ 点击锁定 ═══════════
     await clickMouse(page, 150, 150);
@@ -234,21 +240,15 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // ═══════════ ⑤ 在树里点祖先，往外扩一层 ═══════════
     const clickRow = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const i = rows.findIndex((r) => r.innerText.includes('ad-box'));
-        if (i < 0) return -1;
-        rows[i].click();
-        return i;
+        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('ad-box'));
+        if (!r) return -1;
+        r.querySelector('.name').click();
+        return 1;
     })()`);
     await sleep(800);
     check('⑤ 树里能找到 ad-box 这一层', clickRow >= 0, 'index=' + clickRow);
-    const selAfterWiden = await ev(panel, `(() => {
-        const v = document.querySelectorAll('.info-row .v')[0];
-        return v ? v.innerText.trim() : '';
-    })()`);
-    const matchAfterWiden = await ev(panel, `(() => {
-        const v = document.querySelectorAll('.info-row .v')[1];
-        return v ? v.innerText.trim() : '';
-    })()`);
+    const selAfterWiden = await infoVal(panel, '选择器');
+    const matchAfterWiden = await infoVal(panel, '命中');
     console.log('   · 扩一层后:', selAfterWiden, '/', matchAfterWiden);
     check('⑤ 往外扩之后选择器变成外层容器',
         selAfterWiden.includes('ad-box'), selAfterWiden);

@@ -445,9 +445,10 @@ function openTagSource(el: Element): string {
         let v = a.value.replace(/\s+/g, ' ');
         // 去掉我们临时打的标记类，别让用户看到 __adc_match 这种东西
         if (a.name === 'class') v = v.split(' ').filter((c) => c && !c.startsWith('__adc_')).join(' ');
-        if (v.length > 60) v = v.slice(0, 60) + '…';
+        // 换行模式下要能看全，所以放宽到 400/1200；不换行时靠 CSS 截断
+        if (v.length > 400) v = v.slice(0, 400) + '…';
         out += ` ${a.name}="${v}"`;
-        if (out.length > 160) { out += ' …'; break; }
+        if (out.length > 1200) { out += ' …'; break; }
     }
     return out + '>';
 }
@@ -458,6 +459,12 @@ const MAX_TREE_NODES = 400;
 /** 按当前展开状态，把 DOM 拍平成一串节点 */
 function buildTree(): TreeNodeInfo[] {
     const out: TreeNodeInfo[] = [];
+    /**
+     * 当前行直接拿"元素本身"比，不用路径字符串。
+     * 之前用 currentPathKey 比，一旦它没设上（setSelected 漏了），
+     * 树就会把 <html> 标成当前行 —— 反复出过好几次。
+     */
+    const cur = locked ? currentEl() : lastHovered;
     const walk = (el: Element, path: number[]) => {
         if (out.length >= MAX_TREE_NODES) return;
         // 跳过我们自己插进去的浮层（它挂在 documentElement 下，不该出现在用户的页面树里）
@@ -474,7 +481,8 @@ function buildTree(): TreeNodeInfo[] {
                 .slice(0, 3),
             hasChildren: el.children.length > 0,
             expanded: isOpen,
-            current: key === currentPathKey,
+            // 优先按元素本身比；万一拿不到当前元素，退回按路径比
+            current: cur ? el === cur : key === currentPathKey,
             html: openTagSource(el),
             // 用 textContent（不触发排版）；innerText 对 html/body 这种大节点太贵，
             // 整棵树每 100ms 算一次会把面板拖慢

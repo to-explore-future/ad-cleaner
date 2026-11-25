@@ -42,6 +42,8 @@ const editingId = ref<string | null>(null);
 /** 完整 DOM 树（扁平化后的一串节点） */
 const tree = ref<{ path: string; depth: number; tag: string; id: string; classes: string[]; hasChildren: boolean; expanded: boolean; current: boolean; text: string; html: string }[]>([]);
 const currentPath = ref('');
+/** 树里的源码是否换行显示（不换行时一行截断） */
+const wrapSource = ref(true);
 /** 组合规则里勾选的标签（路径集合） */
 const checkedPaths = ref<Set<string>>(new Set());
 const currentIndex = ref(-1);
@@ -647,9 +649,18 @@ async function pollPickerState(): Promise<void> {
              * 重刷一次树，用户看到的就是"右侧标签树跟着鼠标变"。
              * 树只在内容脚本主动推送（adc:pickerChanged）时更新。
              */
-            tree.value = st.tree ?? [];
-            currentPath.value = st.currentPath ?? '';
-            selector.value = st.selector;
+            /**
+             * ⚠️ 只有"选中的目标变了"才允许刷新树。
+             *    锁定之后鼠标往抽屉这边滑，路上会掠过别的元素；
+             *    只要选择器没变，树就**一个字都不许动**。
+             *    （这条被改坏过两次，REGRESSIONS 第 2 条）
+             */
+            const nextSel = st.selector ?? '';
+            if (nextSel !== selector.value || !currentPath.value) {
+                tree.value = st.tree ?? [];
+                currentPath.value = st.currentPath ?? '';
+            }
+            selector.value = nextSel;
             matchCount.value = st.matchCount;
             broadSelector.value = st.broadSelector ?? '';
             broadCount.value = st.broadCount ?? 0;
@@ -705,9 +716,15 @@ function onRuntimeMessage(msg: unknown): void {
     const m = msg as {
         type?: string;
         selector?: string; matchCount?: number; broadSelector?: string; broadCount?: number;
+        tree?: typeof tree.value; currentPath?: string;
     };
     if (m?.type === 'adc:pickerChanged') {
-        selector.value = m.selector ?? '';
+        const nextSel = m.selector ?? '';
+        if (nextSel !== selector.value || !currentPath.value) {
+            tree.value = m.tree ?? [];
+            currentPath.value = m.currentPath ?? '';
+        }
+        selector.value = nextSel;
         matchCount.value = m.matchCount ?? 0;
         broadSelector.value = m.broadSelector ?? '';
         broadCount.value = m.broadCount ?? 0;
@@ -890,7 +907,12 @@ onUnmounted(() => {
             <div class="pick-head">
                 <div class="pick-title">{{ editingId ? '修改规则' : '选择模式' }}</div>
                 <div class="pick-hint">
-                    鼠标在页面上移动，点一下选中；要往外扩一层，就在下边点它的上级
+                    <span>鼠标在页面上移动，点一下选中；要往外扩一层，就在下边点它的上级</span>
+                    <button
+                        class="wrap-btn"
+                        :class="{ on: wrapSource }"
+                        @click="wrapSource = !wrapSource"
+                    >{{ wrapSource ? '源码换行中' : '源码不换行' }}</button>
                 </div>
             </div>
 
@@ -904,13 +926,13 @@ onUnmounted(() => {
                 和页面连不上 —— 刷新一下这个页面，再点「选中要拦的东西」
             </div>
 
-            <div ref="treeEl" class="tree">
+            <div ref="treeEl" class="tree" :class="{ 'wrap-src': wrapSource }">
                 <div
                     v-for="n in tree"
                     :key="n.path"
                     class="row"
                     :class="{ current: n.current }"
-                    :style="{ paddingLeft: 4 + n.depth * 11 + 'px' }"
+                    :style="{ paddingLeft: 2 + n.depth * 7 + 'px' }"
                 >
                     <!-- 勾选：用来组合成规则 -->
                     <span
@@ -1479,7 +1501,13 @@ onUnmounted(() => {
     border-bottom: 1px solid #f2f3f5;
 }
 .pick-title { font-size: 13.5px; font-weight: 600; }
-.pick-hint { margin-top: 3px; font-size: 11.5px; color: #86909c; line-height: 1.6; }
+.pick-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pick-hint2 { margin-top: 3px; font-size: 11.5px; color: #86909c; line-height: 1.6; }
 
 .warn-bar {
     flex: none;
@@ -1638,6 +1666,23 @@ onUnmounted(() => {
     color: #7a5af8;
     white-space: nowrap;
 }
+/* 换行模式：整行放开，高度自适应 */
+.tree.wrap-src .row { height: auto; min-height: 24px; align-items: flex-start; padding-top: 2px; padding-bottom: 2px; }
+.tree.wrap-src .name { white-space: normal; word-break: break-all; line-height: 1.55; }
+.tree.wrap-src .html { white-space: normal; word-break: break-all; }
+
+.wrap-btn {
+    margin-left: auto;
+    flex: none;
+    border: 1px solid #e5e6eb;
+    background: #fff;
+    color: #86909c;
+    font-size: 10.5px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    cursor: pointer;
+}
+.wrap-btn.on { border-color: #00aeec; color: #00aeec; background: #f0fbff; }
 .row:hover { background: #f7fafc; }
 
 /* 选中：明显加深 + 左侧蓝条 + 加粗，一眼看出选的是哪个 */

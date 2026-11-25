@@ -1033,7 +1033,7 @@ onUnmounted(() => {
                     v-for="n in tree"
                     :key="n.path"
                     class="row"
-                    :class="{ current: n.current, folded: foldedRows.has(n.path) }"
+                    :class="{ current: n.current, folded: foldedRows.has(n.path), checked: checkedPaths.has(n.path) }"
                     :style="{ paddingLeft: 2 + n.depth * 7 + 'px' }"
                 >
                     <!-- 勾选：用来组合成规则 -->
@@ -1678,7 +1678,7 @@ onUnmounted(() => {
     cursor: pointer;
     position: relative;
 }
-.chk.on { background: #00aeec; border-color: #00aeec; }
+.chk.on { background: #00B42A; border-color: #00B42A; }
 .chk.on::after {
     content: '';
     position: absolute;
@@ -1831,15 +1831,20 @@ onUnmounted(() => {
     cursor: pointer;
 }
 .wrap-btn.on { border-color: #00aeec; color: #00aeec; background: #f0fbff; }
-.row:hover { background: #f7fafc; }
+/* 悬浮 = 中性灰 */
+.row:hover { background: #F2F4F7; }
 
-/* 选中：明显加深 + 左侧蓝条 + 加粗，一眼看出选的是哪个 */
+/* 勾选（组合用）= 淡绿底 + 绿色复选框 */
+.row.checked { background: #EAF9EE; }
+
+/* 选中（锁定）= 淡蓝底 + 左侧 3px 蓝条 + 加粗
+   选中和勾选同时存在时：底色取蓝（选中优先），绿勾保留 */
 .row.current {
-    background: #d6ecff;
-    box-shadow: inset 3px 0 0 #00aeec;
+    background: #E6F0FF;
+    box-shadow: inset 3px 0 0 #1677FF;
 }
 .row.current .name { font-weight: 600; }
-.row.current .tag { color: #005f8a; }
+.row.current .html { color: #1c4fd8; }
 
 .tag { color: #7a5af8; }
 .id { color: #f53f3f; }

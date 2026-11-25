@@ -1052,6 +1052,35 @@ async function importRulesFile(panel, filePath) {
         check('⑮ 当前行落在列表垂直正中（树不够长，免检）', true);
     }
 
+    // ═══════════ ⑯ 三种状态用不同颜色区分 ═══════════
+    // 勾一个不是当前行的节点，才能同时拿到"选中"和"勾选"两种状态
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => !x.classList.contains('current') && x.querySelector('.chk'));
+        r && r.querySelector('.chk').click();
+        return !!r;
+    })()`);
+    await sleep(600);
+
+    const colors = JSON.parse(await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const cur = rows.find((r) => r.classList.contains('current'));
+        const checked = rows.find((r) => r.classList.contains('checked') && !r.classList.contains('current'));
+        const plain = rows.find((r) => !r.classList.contains('current') && !r.classList.contains('checked'));
+        const chkOn = document.querySelector('.tree .row .chk.on');
+        return JSON.stringify({
+            current: cur ? getComputedStyle(cur).backgroundColor : '',
+            checked: checked ? getComputedStyle(checked).backgroundColor : '',
+            plain: plain ? getComputedStyle(plain).backgroundColor : '',
+            checkbox: chkOn ? getComputedStyle(chkOn).backgroundColor : '',
+        });
+    })()`));
+    console.log('   · 颜色:', JSON.stringify(colors));
+    check('⑯ 有勾选的行（绿色系）', !!colors.checked, JSON.stringify(colors));
+    check('⑯ 勾选行底色 ≠ 选中行底色', colors.checked !== colors.current, `${colors.checked} vs ${colors.current}`);
+    check('⑯ 勾选行底色 ≠ 普通行底色', colors.checked !== colors.plain, `${colors.checked} vs ${colors.plain}`);
+    check('⑯ 复选框是绿色', /rgb\(0, 180, 42\)/.test(colors.checkbox), colors.checkbox);
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

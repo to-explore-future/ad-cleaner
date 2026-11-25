@@ -133,6 +133,8 @@ function applyConditionalRules(): void {
         }
         for (const el of targets) {
             if (!meetsCondition(el, r.condition!)) continue;
+            // 悬浮预览时这些元素要临时显形，别被 MutationObserver 又藏回去
+            if (previewAdvanced && previewed.includes(el)) continue;
             if (r.action === 'remove') el.remove();
             else el.classList.add(BLOCKED_CLASS);
         }
@@ -185,6 +187,51 @@ function matchesParts(root: Element, parts: RulePart[]): boolean {
     return true;
 }
 
+/** 只保留匹配需要的最小字段，面板可以整条规则发过来。 */
+interface MatchableRule {
+    selector: string;
+    condition?: RuleCondition;
+    parts?: RulePart[];
+}
+
+/**
+ * 一条规则**真正**会命中的元素。
+ *
+ * ⚠️ 不能只拿 `selector` 去 querySelectorAll：
+ *    · 条件规则还要过文字/内部元素校验；
+ *    · 组合规则要按层级差逐段走。
+ *    以前命中数就是这么算错的（6 个卡片显示成 6，实际只拦 2 个广告）。
+ */
+function elementsMatchingRule(rule: MatchableRule): Element[] {
+    if (rule.parts && rule.parts.length > 1) {
+        const head = rule.parts[0];
+        let anchors: Element[] = [];
+        try {
+            anchors = Array.from(document.querySelectorAll(head.selector));
+        } catch {
+            return [];
+        }
+        return anchors.filter((el) => {
+            if (head.text &&
+                !((el as HTMLElement).innerText ?? el.textContent ?? '').includes(head.text)) return false;
+            return matchesParts(el, rule.parts!);
+        });
+    }
+
+    let list: Element[] = [];
+    try {
+        list = Array.from(document.querySelectorAll(rule.selector));
+    } catch {
+        return [];
+    }
+    if (rule.condition) return list.filter((el) => meetsCondition(el, rule.condition!));
+    return list;
+}
+
+function countRuleMatches(rule: MatchableRule): number {
+    return elementsMatchingRule(rule).length;
+}
+
 /** 把组合规则命中的元素标出来 / 删掉 */
 function applyPartRules(): void {
     const list = rules.filter((r) => r.enabled && r.parts && r.parts.length > 1);
@@ -202,6 +249,8 @@ function applyPartRules(): void {
             if (head.text &&
                 !((el as HTMLElement).innerText ?? el.textContent ?? '').includes(head.text)) continue;
             if (!matchesParts(el, r.parts!)) continue;
+            // 同上：预览中的元素保持显形
+            if (previewAdvanced && previewed.includes(el)) continue;
             if (r.action === 'remove') el.remove();
             else el.classList.add(BLOCKED_CLASS);
         }
@@ -499,10 +548,33 @@ function buildTree(): TreeNodeInfo[] {
     return out;
 }
 
+/**
+ * 锁定后的树快照。
+ *
+ * ⚠️ 为什么必须缓存：面板每 100ms 轮询一次 `adc:state`，
+ *    以前每次都全量 `buildTree()`（最多 400 节点、拼所有属性）。
+ *    更糟的是页面自己懒加载/插节点时，重建出来的行数会变 ——
+ *    用户看到的就是"选中之后树还在变"（测试 ⑭）。
+ *    锁定期间只认用户操作（展开/选节点/换目标）产生的快照。
+ */
+let cachedTree: TreeNodeInfo[] | null = null;
+
+function invalidateTree(): void {
+    cachedTree = null;
+}
+
+/** 未锁定时实时算（F12 那种跟随）；锁定时用快照。 */
+function treeSnapshot(): TreeNodeInfo[] {
+    if (!locked) return buildTree();
+    if (!cachedTree) cachedTree = buildTree();
+    return cachedTree;
+}
+
 /** 展开 / 收起某个节点 */
 function togglePath(key: string): void {
     if (expandedPaths.has(key)) expandedPaths.delete(key);
     else expandedPaths.add(key);
+    invalidateTree();
     notifyPanel();
 }
 
@@ -554,7 +626,7 @@ function currentState() {
         broadSelector: broad,
         /** 同类元素有几个 */
         broadCount: broad ? countMatches(broad) : 0,
-        tree: buildTree(),
+        tree: treeSnapshot(),
         currentPath: currentPathKey,
     };
 }
@@ -589,6 +661,7 @@ function updateFollowBox(): void {
 
 function setSelected(el: Element, opts: { repaint?: boolean } = {}): void {
     if (isPreviewing()) revertPreview();
+    invalidateTree();
     locked = true;
     // 记下它在整棵树里的位置，并展开到它 —— 否则树的"当前行"会停在 html
     const p = elementPath(el);
@@ -607,6 +680,7 @@ function setSelected(el: Element, opts: { repaint?: boolean } = {}): void {
 function selectAncestor(index: number): void {
     if (index < 0 || index >= chain.length) return;
     if (isPreviewing()) revertPreview();
+    invalidateTree();
     currentIndex = index;
     const el = currentEl();
     paint(el);
@@ -620,6 +694,7 @@ function startPicker(): void {
     locked = false;
     chain = [];
     currentIndex = -1;
+    invalidateTree();
     ensureOverlay();
     document.addEventListener('mousemove', onMove, true);
     document.addEventListener('mousedown', onDown, true);
@@ -635,6 +710,7 @@ function stopPicker(): void {
     if (!picking) return;
     picking = false;
     condPicking = false;
+    invalidateTree();
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('click', onClick, true);
@@ -714,6 +790,7 @@ function onDown(e: MouseEvent): void {
 function unlockSelection(): void {
     if (isPreviewing()) revertPreview();
     locked = false;
+    invalidateTree();
 
     // 回到悬浮模式：高亮框重新跟到鼠标下的元素
     const el = lastHovered;
@@ -773,8 +850,16 @@ function onScrollResize(): void {
 
 // ───────────────────────── 预览 ─────────────────────────
 
+/** 悬浮预览时，是否临时把"条件/组合规则"藏起来的元素显形了 */
+let previewAdvanced = false;
+
 /** 高亮某个选择器会命中的元素（已生效的规则要先临时显形）。 */
-function previewSelector(selector: string, action: string): number {
+function previewSelector(
+    selector: string,
+    action: string,
+    condition?: RuleCondition,
+    parts?: RulePart[],
+): number {
     clearPreviewClasses();
     if (!selector) return 0;
 
@@ -787,16 +872,23 @@ function previewSelector(selector: string, action: string): number {
     previewExclude = selector;
     rewriteStyle();
 
-    let n = 0;
+    let list: Element[] = [];
     try {
-        document.querySelectorAll(selector).forEach((el) => {
-            el.classList.add(OUTLINE_CLASS);
-            n++;
-        });
+        // ⚠️ 不能只按 selector 标：条件/组合规则的真实命中范围更小。
+        //    以前悬浮一条"只拦 2 个广告"的规则，会把 6 个同类全标出来。
+        list = elementsMatchingRule({ selector, condition, parts });
     } catch {
-        n = -1;
+        return -1;
     }
-    return n;
+
+    previewAdvanced = !!(condition || (parts && parts.length > 1));
+    for (const el of list) {
+        // 条件/组合规则是靠 __adc_blocked 藏的，预览时要临时摘掉才看得见
+        if (previewAdvanced) el.classList.remove(BLOCKED_CLASS);
+        el.classList.add(OUTLINE_CLASS);
+        previewed.push(el);
+    }
+    return list.length;
 }
 
 let previewed: Element[] = [];
@@ -807,6 +899,12 @@ function clearPreviewClasses(): void {
     document.querySelectorAll('.' + OUTLINE_CLASS).forEach((el) => {
         el.classList.remove(OUTLINE_CLASS);
     });
+    // 高级规则预览时摘掉的隐藏类要补回去，否则移开鼠标后广告不会重新藏起来
+    if (previewAdvanced) {
+        previewAdvanced = false;
+        applyConditionalRules();
+        applyPartRules();
+    }
 }
 
 function clearPreview(): void {
@@ -1097,7 +1195,12 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 sendResponse({ ok: true });
                 return false;
             case 'adc:preview': {
-                const n = previewSelector(String(msg.selector ?? ''), String(msg.action ?? 'hide'));
+                const n = previewSelector(
+                    String(msg.selector ?? ''),
+                    String(msg.action ?? 'hide'),
+                    msg.condition as RuleCondition | undefined,
+                    msg.parts as RulePart[] | undefined,
+                );
                 sendResponse({ ok: true, count: n });
                 return false;
             }
@@ -1133,6 +1236,15 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
             case 'adc:countAll': {
                 const sels: string[] = Array.isArray(msg.selectors) ? msg.selectors : [];
                 const counts = sels.map((x) => countMatches(x));
+                sendResponse({ ok: true, counts });
+                return false;
+            }
+            case 'adc:countRules': {
+                // 条件/组合规则不能只按 selector 算，必须走真实匹配
+                const list: MatchableRule[] = Array.isArray(msg.rules) ? msg.rules : [];
+                const counts = list.map((r) =>
+                    r && typeof r.selector === 'string' ? countRuleMatches(r) : -1,
+                );
                 sendResponse({ ok: true, counts });
                 return false;
             }

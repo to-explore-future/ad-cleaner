@@ -2,7 +2,7 @@
   "name": "ad-block-helper",
   "description": "广告拦截助手 —— 像 F12 一样在页面上点选不想看的内容，把它留空。",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "dev": "wxt",

@@ -239,10 +239,17 @@ async function refreshCounts(): Promise<void> {
      * ⚠️ 用 sendToTabOrInject：换了新版本之后，**已经打开的页面里还是旧脚本**
      *    （上下文已失效），直接发消息会失败 —— 表现就是命中数全是「—」。
      *    这里发不通就自动补注入一次，用户不用手动刷新。
+     *
+     * ⚠️ 不能只发 selector：条件/组合规则的真实命中范围比 selector 小，
+     *    只按 selector 算会把"只拦 2 个广告"显示成 6。
      */
     const res = await sendToTabOrInject<{ ok: boolean; counts: number[] }>({
-        type: 'adc:countAll',
-        selectors: rules.value.map((r) => r.selector),
+        type: 'adc:countRules',
+        rules: rules.value.map((r) => ({
+            selector: r.selector,
+            condition: r.condition,
+            parts: r.parts,
+        })),
     });
     const out: Record<string, number> = {};
     rules.value.forEach((r, i) => {
@@ -277,7 +284,11 @@ async function onDelete(rule: BlockRule): Promise<void> {
 async function onHoverRule(rule: BlockRule): Promise<void> {
     if (!settings.value.showEffect) return;
     const res = await sendToTab<{ ok: boolean; count: number }>({
-        type: 'adc:preview', selector: rule.selector, action: rule.action,
+        type: 'adc:preview',
+        selector: rule.selector,
+        action: rule.action,
+        condition: rule.condition,
+        parts: rule.parts,
     });
     if (res && res.count === -1) {
         showToast(rule.action === 'remove' ? '删除类规则无法预览' : '选择器已失效');
@@ -694,8 +705,12 @@ async function pollPickerState(): Promise<void> {
             matchCount.value = st.matchCount;
             broadSelector.value = st.broadSelector ?? '';
             broadCount.value = st.broadCount ?? 0;
-            tree.value = st.tree ?? [];
-            currentPath.value = st.currentPath ?? '';
+            /**
+             * ⚠️ 这里**不许**再无条件 `tree.value = st.tree`。
+             *    上面闸门之外再刷一次，等于闸门没写 —— 锁定后页面自己插几个节点，
+             *    树的行数就会变（REGRESSIONS 第 2 条 / 测试 ⑭）。
+             *    树的更新只能走闸门内的那三行。
+             */
             /**
              * 默认按 **class** 拦（用户明确要求）。
              * 只要页面上真的存在"同类"，第一次拿到数量就自动切过去；
@@ -759,8 +774,7 @@ function onRuntimeMessage(msg: unknown): void {
         matchCount.value = m.matchCount ?? 0;
         broadSelector.value = m.broadSelector ?? '';
         broadCount.value = m.broadCount ?? 0;
-        tree.value = (msg as { tree?: typeof tree.value }).tree ?? [];
-        currentPath.value = (msg as { currentPath?: string }).currentPath ?? '';
+        // 树只在上面闸门内更新；这里再刷一次会让锁定后的树跟着页面变（⑭）。
     } else if (m?.type === 'adc:condPicked') {
         const r = msg as { total?: number; candidates?: typeof condCandidates.value };
         condTotal.value = r.total ?? 0;

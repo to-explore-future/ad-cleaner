@@ -107,6 +107,18 @@ const displayOf = (page, sel) => ev(page, `(() => {
     return getComputedStyle(el).display;
 })()`);
 
+/** 把文件塞进隐藏的 <input type=file>，触发真正的导入流程。 */
+async function importRulesFile(panel, filePath) {
+    await panel.send('DOM.enable');
+    const doc = await panel.send('DOM.getDocument');
+    const node = await panel.send('DOM.querySelector', {
+        nodeId: doc.root.nodeId,
+        selector: 'input[type=file]',
+    });
+    if (!node.nodeId) throw new Error('面板里找不到文件输入框');
+    await panel.send('DOM.setFileInputFiles', { files: [filePath], nodeId: node.nodeId });
+}
+
 (async () => {
     await getJson(`http://127.0.0.1:${PORT}/json/version`);
     let sw = null, extId = null;
@@ -530,6 +542,59 @@ const displayOf = (page, sel) => ev(page, `(() => {
     })()`);
     check('⑧ 控件藏起来了（不出现原生"选择文件"）', nativeInputShown === 'none', String(nativeInputShown));
 
+    // ═══════════ ⑧b 导入：条件 / 组合字段不许丢 ═══════════
+    const importFile = path.join(os.tmpdir(), 'adc-import-roundtrip.json');
+    fs.writeFileSync(importFile, JSON.stringify({
+        format: 1,
+        app: '广告拦截助手',
+        version: '0.2.2',
+        exportedAt: Date.now(),
+        rules: {
+            '127.0.0.1': [
+                {
+                    id: 'imp-cond', domain: '127.0.0.1', selector: '.feed-item', action: 'hide',
+                    enabled: true, label: '导入-条件', createdAt: 1,
+                    condition: { type: 'text', value: '广告' },
+                },
+                {
+                    id: 'imp-parts', domain: '127.0.0.1', selector: '.ad-box', action: 'hide',
+                    enabled: true, label: '导入-组合', createdAt: 2,
+                    parts: [
+                        { selector: '.ad-box', relDepth: 0 },
+                        { selector: '.ad-wrap', relDepth: 1 },
+                    ],
+                },
+            ],
+        },
+    }, null, 2));
+
+    // 预置一条"同 selector、不同条件"的规则：导入时不许把它覆盖掉
+    await ev(panel, `chrome.storage.local.set({ blockRules: { '127.0.0.1': [{
+        id: 'pre1', domain: '127.0.0.1', selector: '.feed-item', action: 'hide',
+        enabled: true, label: '原有', createdAt: 1,
+        condition: { type: 'text', value: '推广' },
+    }] } }).then(()=>'ok')`);
+    await sleep(500);
+    await importRulesFile(panel, importFile);
+    await sleep(1600);
+    const imported = await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        const list = Object.values(g.blockRules || {}).flat();
+        return JSON.stringify({
+            total: list.length,
+            conds: list.map((r) => r.condition?.value).filter(Boolean),
+            parts: list.find((r) => r.parts)?.parts?.length ?? 0,
+        });
+    })()`);
+    const imp = JSON.parse(imported);
+    console.log('   · 导入结果:', imported);
+    check('⑧b 导入保留条件规则', imp.conds.includes('广告'), JSON.stringify(imp.conds));
+    check('⑧b 导入保留组合规则（2 段）', imp.parts === 2, String(imp.parts));
+    check('⑧b 同选择器不同条件的规则没互相覆盖', imp.total === 3, `${imp.total} 条`);
+    // 清空，别影响后面的用例
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(500);
+
     // ═══════════ ⑩ 加条件：外层选一类，内层点条件 ═══════════
     await page.send('Page.reload');
     await sleep(2200);
@@ -628,6 +693,40 @@ const displayOf = (page, sel) => ev(page, `(() => {
         return JSON.stringify(Object.values(g.blockRules || {}).flat().map(r => r.condition || null));
     })()`);
     check('⑩ 存下来的规则带条件', /"type":"text"/.test(savedCond) && /广告/.test(savedCond), savedCond);
+
+    // 规则列表的命中数必须按"条件过滤后"算，不能按同类总数 6 算
+    await sleep(2600);
+    const condCount = await ev(panel, `(() => {
+        const row = [...document.querySelectorAll('.rule')].find((r) => /广告/.test(r.innerText));
+        if (!row) return 'none';
+        return row.querySelector('.count')?.innerText.trim() ?? 'no-count';
+    })()`);
+    check('⑩ 规则列表命中数按条件算（2，不是 6）', condCount === '2', condCount);
+
+    // 悬浮这条规则 → 只预览真实命中的 2 个，而且已生效的要临时显形
+    await ev(panel, `(() => {
+        const row = [...document.querySelectorAll('.rule')].find((r) => /广告/.test(r.innerText));
+        row?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        return true;
+    })()`);
+    await sleep(900);
+    const previewCond = await ev(page, `JSON.stringify({
+        outlined: document.querySelectorAll('.__adc_outline').length,
+        ads: [...document.querySelectorAll('.feed-item.is-ad')].map((e) => getComputedStyle(e).display),
+    })`);
+    const pv = JSON.parse(previewCond);
+    console.log('   · 条件规则悬浮预览:', previewCond);
+    check('⑩ 悬浮条件规则只预览 2 个', pv.outlined === 2, `${pv.outlined} 个`);
+    check('⑩ 悬浮条件规则时命中元素临时显形', pv.ads.every((d) => d !== 'none'), JSON.stringify(pv.ads));
+
+    await ev(panel, `(() => {
+        const row = [...document.querySelectorAll('.rule')].find((r) => /广告/.test(r.innerText));
+        row?.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+        return true;
+    })()`);
+    await sleep(800);
+    const afterLeave = await ev(page, `JSON.stringify([...document.querySelectorAll('.feed-item.is-ad')].map((e) => getComputedStyle(e).display))`);
+    check('⑩ 移开鼠标后条件规则重新隐藏', JSON.parse(afterLeave).every((d) => d === 'none'), afterLeave);
 
     // ═══════════ ⑪ 组合标签规则：勾几层 → 一条规则 ═══════════
     await page.send('Page.reload');

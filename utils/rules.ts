@@ -1,4 +1,4 @@
-import type { BlockRule, Settings } from './types';
+import type { BlockRule, RuleCondition, RulePart, Settings } from './types';
 
 const RULES_KEY = 'blockRules';
 const SETTINGS_KEY = 'settings';
@@ -119,9 +119,55 @@ export async function exportAllRules(appVersion: string): Promise<string> {
 }
 
 /**
+ * 校验导入文件里的条件。
+ *
+ * ⚠️ 这里以前直接丢掉 condition —— 导出的条件规则再导入就退化成
+ *    "按 class 全拦"，会误伤整条信息流。宁可拒绝一条坏数据，也不能静默改语义。
+ */
+function sanitizeCondition(raw: unknown): RuleCondition | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const c = raw as Partial<RuleCondition>;
+    if (c.type !== 'text' && c.type !== 'selector') return undefined;
+    if (typeof c.value !== 'string' || !c.value) return undefined;
+    return { type: c.type, value: c.value };
+}
+
+/** 校验组合规则的分段；任何一段不合法就整条不认（避免半条规则误拦）。 */
+function sanitizeParts(raw: unknown): RulePart[] | undefined {
+    if (!Array.isArray(raw) || raw.length < 2) return undefined;
+    const out: RulePart[] = [];
+    for (let i = 0; i < raw.length; i++) {
+        const p = raw[i] as Partial<RulePart> | null;
+        if (!p || typeof p.selector !== 'string' || !p.selector) return undefined;
+        const relDepth = i === 0 ? 0 : Number(p.relDepth);
+        if (!Number.isInteger(relDepth) || relDepth < 0) return undefined;
+        out.push({
+            selector: p.selector,
+            relDepth,
+            ...(typeof p.text === 'string' && p.text ? { text: p.text } : {}),
+        });
+    }
+    return out;
+}
+
+/**
+ * 合并时判断"是不是同一条规则"。
+ *
+ * 不能只看 selector：同一类卡片可以有一条"含广告"的条件规则和一条普通规则，
+ * 只按 selector 合并会让它们互相覆盖。条件 + 组合都要算进身份。
+ */
+function ruleIdentity(rule: Pick<BlockRule, 'selector' | 'condition' | 'parts'>): string {
+    return [
+        rule.selector,
+        rule.condition ? `${rule.condition.type}:${rule.condition.value}` : '',
+        rule.parts ? JSON.stringify(rule.parts) : '',
+    ].join('\u0000');
+}
+
+/**
  * 导入规则。
  *
- * 合并策略：**同一个 domain 下 selector 相同的视为同一条**，以导入的为准；
+ * 合并策略：**条件、选择器、组合结构都相同**的视为同一条，以导入的为准；
  * 其余全部追加。不覆盖、不清空本地已有的东西 —— 用户最怕"导个文件把原来的弄没了"。
  */
 export async function importRules(text: string): Promise<{ added: number; updated: number; domains: number }> {
@@ -142,7 +188,8 @@ export async function importRules(text: string): Promise<{ added: number; update
         const existing = all[domain] ?? [];
         for (const r of list) {
             if (!r || typeof r.selector !== 'string' || !r.selector) continue;
-            const i = existing.findIndex((x) => x.selector === r.selector);
+            const condition = sanitizeCondition(r.condition);
+            const parts = sanitizeParts(r.parts);
             const rule: BlockRule = {
                 id: r.id || newRuleId(),
                 domain,
@@ -151,7 +198,11 @@ export async function importRules(text: string): Promise<{ added: number; update
                 enabled: r.enabled !== false,
                 label: r.label || r.selector,
                 createdAt: r.createdAt || Date.now(),
+                ...(condition ? { condition } : {}),
+                ...(parts ? { parts } : {}),
             };
+            const key = ruleIdentity(rule);
+            const i = existing.findIndex((x) => ruleIdentity(x) === key);
             if (i >= 0) {
                 existing[i] = rule;
                 updated++;

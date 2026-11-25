@@ -762,6 +762,9 @@ const displayOf = (page, sel) => ev(page, `(() => {
     check('⑫ 普通卡片没被误杀', st12.normals.every((d) => d !== 'none'), JSON.stringify(st12.normals));
 
     // ═══════════ ⑬ 锁定后鼠标滑向抽屉，树不许变 ═══════════
+    // 先把上一段留下的选择模式退掉，否则 .primary 是「拦截这个」
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(800);
     await page.send('Page.reload');
     await sleep(2000);
     await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
@@ -779,7 +782,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     const lockedRow = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent ?? ''`);
     const lockedSel13 = await infoVal(panel, '选择器');
     check('⑬ 锁定后树里有当前行', !!lockedRow && !/^<html/.test(lockedRow), lockedRow || '(无)');
-    check('⑬ 确实选中了元素（选择器不是空的）', lockedSel !== '—' && !!lockedSel, lockedSel);
+    check('⑬ 确实选中了元素（选择器不是空的）', lockedSel13 !== '—' && !!lockedSel13, lockedSel13);
 
     // 往右边刷地去（模拟鼠标离开页面去够抽屉），沿途掠过大片别的元素
     for (const pt of [[900, 60], [1000, 300], [1100, 120], [1180, 500]]) {

@@ -44,6 +44,12 @@ const tree = ref<{ path: string; depth: number; tag: string; id: string; classes
 const currentPath = ref('');
 /** 树里的源码是否换行显示（不换行时一行截断） */
 const wrapSource = ref(true);
+/** 树是否需要刷新（用户自己点展开/选节点时才置 true，用一次就清） */
+const allowTreeUpdate = ref(false);
+function markTreeUpdate(): void {
+    allowTreeUpdate.value = true;
+}
+
 /** 被单独折叠成单行的节点（内容特别长的那些） */
 const foldedRows = ref<Set<string>>(new Set());
 
@@ -407,6 +413,7 @@ async function startPick(): Promise<void> {
     startPolling();
     tree.value = [];
     currentPath.value = '';
+    allowTreeUpdate.value = false;
     selector.value = '';
     matchCount.value = 0;
 }
@@ -425,6 +432,7 @@ async function startEdit(rule: BlockRule): Promise<void> {
     startPolling();
     tree.value = [];
     currentPath.value = '';
+    allowTreeUpdate.value = false;
     selector.value = '';
     matchCount.value = 0;
 
@@ -523,12 +531,14 @@ async function composeRule(): Promise<void> {
 
 /** 展开 / 收起树节点 */
 function togglePath(path: string): void {
+    markTreeUpdate();
     void sendToTab({ type: 'adc:togglePath', path });
 }
 
 /** 选中树节点 */
 function selectPath(path: string): void {
     void stopPreview();
+    markTreeUpdate();
     currentPath.value = path;
     void sendToTab({ type: 'adc:selectPath', path });
 }
@@ -665,9 +675,20 @@ async function pollPickerState(): Promise<void> {
              *    （这条被改坏过两次，REGRESSIONS 第 2 条）
              */
             const nextSel = st.selector ?? '';
-            if (nextSel !== selector.value || !currentPath.value) {
+            /**
+             * ⚠️ 铁律：**只有这三种情况**才允许刷新树
+             *  ① 选中的目标变了（换了一个元素）
+             *  ② 树还是空的（第一次进选择模式）
+             *  ③ 用户自己点了展开/收起或树里的节点（allowTreeUpdate）
+             *
+             * 之前写成 `|| !currentPath.value`，而 currentPath 经常是空的，
+             * 等于闸门常开 —— 于是锁定后鼠标往抽屉滑，树跟着页面变。
+             * 这条被改坏过三次（REGRESSIONS 第 2 条）。
+             */
+            if (nextSel !== selector.value || !tree.value.length || allowTreeUpdate.value) {
                 tree.value = st.tree ?? [];
                 currentPath.value = st.currentPath ?? '';
+                allowTreeUpdate.value = false;
             }
             selector.value = nextSel;
             matchCount.value = st.matchCount;
@@ -729,9 +750,10 @@ function onRuntimeMessage(msg: unknown): void {
     };
     if (m?.type === 'adc:pickerChanged') {
         const nextSel = m.selector ?? '';
-        if (nextSel !== selector.value || !currentPath.value) {
+        if (nextSel !== selector.value || !tree.value.length || allowTreeUpdate.value) {
             tree.value = m.tree ?? [];
             currentPath.value = m.currentPath ?? '';
+            allowTreeUpdate.value = false;
         }
         selector.value = nextSel;
         matchCount.value = m.matchCount ?? 0;

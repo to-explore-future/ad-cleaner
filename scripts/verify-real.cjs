@@ -797,6 +797,46 @@ const displayOf = (page, sel) => ev(page, `(() => {
     check('⑬ 鼠标掠过别的元素，树的当前行不变', afterRow === lockedRow, `${lockedRow} → ${afterRow}`);
     check('⑬ 选择器也不变', afterSel13 === lockedSel13, `${lockedSel13} → ${afterSel13}`);
 
+    // ═══════════ ⑭ 锁定后页面自己变化（懒加载/插广告），树也不许变 ═══════════
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(800);
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(900);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(500);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 150, y: 150, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 150, y: 150, button: 'left', clickCount: 1 });
+    await sleep(900);
+
+    const rowsBefore = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    const curBefore = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent ?? ''`);
+
+    // 页面自己在动：插 3 个新节点 + 触发 MutationObserver + 鼠标扫一圈
+    await ev(page, `(() => {
+        for (let i = 0; i < 3; i++) {
+            const d = document.createElement('div');
+            d.className = 'late-added-' + i;
+            d.textContent = '后来的内容 ' + i;
+            document.querySelector('.ad-box').appendChild(d);
+        }
+        return true;
+    })()`);
+    for (const pt of [[900, 60], [1000, 300], [700, 200]]) {
+        await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt[0], y: pt[1], button: 'none' });
+        await sleep(350);
+    }
+    await sleep(700);
+
+    const rowsAfter = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    const curAfter = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent ?? ''`);
+    console.log('   · 行数:', rowsBefore, '→', rowsAfter);
+    check('⑭ 页面新增节点后，树的行数不变', rowsAfter === rowsBefore, `${rowsBefore} → ${rowsAfter}`);
+    check('⑭ 树的当前行不变', curAfter === curBefore, `${curBefore.slice(0, 30)} → ${curAfter.slice(0, 30)}`);
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

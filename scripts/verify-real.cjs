@@ -1160,6 +1160,27 @@ async function importRulesFile(panel, filePath) {
         check('⑱ 选中元素后会主动滚到中间（或到边界）', false, '没有当前行');
     }
 
+    // ═══════════ ⑲ 悬浮只变色，不触发任何逻辑；全局按钮还在 ═══════════
+    const hasGlobalBtn = await ev(panel, `!!document.querySelector('.wrap-btn')`);
+    check('⑲ 顶部全局「源码换行」按钮还在', hasGlobalBtn === true);
+
+    const noRowBtn = await ev(panel, `document.querySelectorAll('.fold-btn').length`);
+    check('⑲ 行内不再有「单行」按钮', Number(noRowBtn) === 0, `${noRowBtn} 个`);
+
+    const rowsBefore19 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    const expandedBefore19 = await ev(panel, `document.querySelectorAll('.tree .row .arrow.open').length`);
+    // 在一堆行上来回悬浮
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        rows.slice(0, 12).forEach((r) => r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter')));
+        return true;
+    })()`);
+    await sleep(700);
+    const rowsAfter19 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    const expandedAfter19 = await ev(panel, `document.querySelectorAll('.tree .row .arrow.open').length`);
+    console.log('   · 行数:', rowsBefore19, '→', rowsAfter19, '| 展开数:', expandedBefore19, '→', expandedAfter19);
+    check('⑲ 悬浮不改变树的展开状态', expandedAfter19 === expandedBefore19, `${expandedBefore19} → ${expandedAfter19}`);
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

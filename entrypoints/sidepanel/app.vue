@@ -50,15 +50,6 @@ function markTreeUpdate(): void {
     allowTreeUpdate.value = true;
 }
 
-/** 被单独折叠成单行的节点（内容特别长的那些） */
-const foldedRows = ref<Set<string>>(new Set());
-
-function toggleFold(path: string): void {
-    const next = new Set(foldedRows.value);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    foldedRows.value = next;
-}
 /** 组合规则里勾选的标签（路径集合） */
 const checkedPaths = ref<Set<string>>(new Set());
 const currentIndex = ref(-1);
@@ -1054,7 +1045,7 @@ onUnmounted(() => {
                     v-for="n in tree"
                     :key="n.path"
                     class="row"
-                    :class="{ current: n.current, folded: foldedRows.has(n.path), checked: checkedPaths.has(n.path) }"
+                    :class="{ current: n.current, checked: checkedPaths.has(n.path) }"
                     :style="{ paddingLeft: 2 + n.depth * 7 + 'px' }"
                 >
                     <!-- 勾选：用来组合成规则 -->
@@ -1082,12 +1073,6 @@ onUnmounted(() => {
                         <span class="html">{{ n.html }}</span>
                         <span v-if="n.text && !n.hasChildren" class="txt">"{{ n.text.slice(0, 40) }}"</span>
                     </span>
-                    <button
-                        v-if="n.text || n.html.length > 60"
-                        class="fold-btn"
-                        :title="foldedRows.has(n.path) ? '展开成多行' : '这一行折叠成单行'"
-                        @click.stop="toggleFold(n.path)"
-                    >{{ foldedRows.has(n.path) ? '展开' : '单行' }}</button>
                 </div>
                 <div v-if="tree.length === 0" class="tree-empty">
                     把鼠标移到页面上
@@ -1818,27 +1803,6 @@ onUnmounted(() => {
 .tree.wrap-src .html { white-space: normal; word-break: break-all; }
 
 /* 单行折叠：这一行强制一行显示 */
-.row.folded .name { white-space: nowrap; }
-.row.folded .html {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    display: block;
-}
-.fold-btn {
-    flex: none;
-    display: none;
-    margin-left: 4px;
-    border: 1px solid #e5e6eb;
-    background: #fff;
-    color: #86909c;
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 8px;
-    cursor: pointer;
-}
-.row:hover .fold-btn { display: block; }
-.fold-btn:hover { border-color: #00aeec; color: #00aeec; }
 
 .wrap-btn {
     margin-left: auto;

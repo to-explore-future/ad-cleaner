@@ -260,7 +260,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     }
 
     // ═══════════ ⑥ 确认拦截 ═══════════
-    await clickPanel(panel, '.foot.three .primary');
+    await clickPanel(panel, '.foot-row .primary');
     await sleep(1500);
     check('⑥ 拦截后广告容器被隐藏',
         (await displayOf(page, '.ad-box')) === 'none',
@@ -352,7 +352,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
 
     // ═══════════ ⑪ 删除模式（真的从 DOM 移除）═══════════
     // 先取消掉编辑
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
     await sleep(1000);
 
     // 新建一条 remove 规则：拦 .dup 里的"同款 1"

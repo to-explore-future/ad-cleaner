@@ -105,3 +105,29 @@
     ⚠️ 居中用即时 `scrollTop`，不要用 `behavior:'smooth'` —— 在 CDP 的
     `Emulation.setDeviceMetricsOverride` 下平滑滚动不生效，测试会假绿/假红。
     → 测试 ⑮ / ⑱ / ㉑
+
+## 0.3.0 新增
+
+27. **条件规则的编辑锚点必须按 pattern 找，不能按 selector 取第一个**
+    信息流里第一条 `.feed-item` 往往是普通卡片，不满足"内部含广告"；
+    `adc:selectBySelector` 只看 selector 会把锚点选错，编辑区一个条件都复现不出来。
+    现在消息带 `pattern/strict`，优先 `elementsMatchingRule(...)[0]`，找不到才退回 selector。
+    → 测试 ⑫b
+
+28. **规则保存后必须重算命中数，并发查询要带"代号"**
+    `refreshRules()` 原来只换列表不算命中数；新规则 id 不在 `counts` 里，
+    会被「本页」过滤掉，刚保存的规则瞬间消失。现在 `refreshRules()` 后接 `refreshCounts()`。
+    另外 `refreshCounts` 用自增 `gen` 丢弃过期响应，避免旧查询晚返回覆盖新结果。
+    命中数未知（-1）时不要藏规则，只有明确算出 0 才归到「本页没有」。
+    → 测试 ⑫ / ⑫b
+
+29. **条件草稿必须实时改变页面圈选范围**
+    只更新面板命中数不够：页面上还留着"同类 6 个"的 `__adc_match`，
+    用户会以为点了没生效。`refreshDraftCount()` 里发 `adc:markPattern`，
+    用真实 pattern 重标；条件删光时才恢复同类高亮（用 `hadComposition` 判断瞬间）。
+    → 测试 ⑩
+
+30. **规则编辑区只能有一个保存按钮**
+    compose 区再加一个 `.primary` 会和底部「拦截这个」撞选择器，也会让用户犹豫点哪个。
+    现在 compose 区只有「清空条件」，唯一主按钮在 `.foot-row`，文案带条件数/含文字。
+    → 测试 ⑩ / ⑪ / ⑫

@@ -106,6 +106,28 @@ const displayOf = (page, sel) => ev(page, `(() => {
     if (!el) return 'missing';
     return getComputedStyle(el).display;
 })()`);
+/** 选择模式底部：保存 / 取消（compose 区不再有第二个按钮，选择器只认 foot-row） */
+const savePick = (panel) => ev(panel, `(() => { document.querySelector('.foot-row .primary')?.click(); return true; })()`);
+const cancelPick = (panel) => ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
+/** 往 v-model 输入框里塞值，必须走原生 setter + input 事件 */
+const setInput = (panel, selector, value) => ev(panel, `(() => {
+    const i = document.querySelector(${JSON.stringify(selector)});
+    if (!i) return false;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(i, ${JSON.stringify(value)});
+    i.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+})()`);
+/** 命中数是异步算的：轮询到期望值，别用固定 sleep 赌 */
+const waitInfo = async (panel, key, pred, tries = 20) => {
+    let v = '';
+    for (let i = 0; i < tries; i++) {
+        v = await infoVal(panel, key);
+        if (pred(v)) return v;
+        await sleep(300);
+    }
+    return v;
+};
 
 /** 把文件塞进隐藏的 <input type=file>，触发真正的导入流程。 */
 async function importRulesFile(panel, filePath) {
@@ -383,7 +405,7 @@ async function importRulesFile(panel, filePath) {
     const widened = await infoVal(panel, '选择器');
     check('⑥ 树里点祖先 → 往外扩一层', widened.includes('ad-box'), widened);
 
-    await ev(panel, `(() => { document.querySelector('.foot.three .primary')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .primary')?.click(); return true; })()`);
     await sleep(1800);
     check('⑥ 确认后广告容器真的被隐藏', (await displayOf(page, '.ad-box')) === 'none', await displayOf(page, '.ad-box'));
     check('⑥ 正文没被误伤', (await displayOf(page, '#keep')) !== 'none');
@@ -435,7 +457,7 @@ async function importRulesFile(panel, filePath) {
     check('⑥c 再点一次页面恢复原样', restored !== 'none', String(restored));
 
     // 退出选择模式，避免影响后续
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
     await sleep(800);
     // 清理本轮产生的规则（只留最开始那条）
     await ev(panel, `(async () => {
@@ -490,7 +512,7 @@ async function importRulesFile(panel, filePath) {
         finalSel.includes('.dup') && !finalSel.includes('nth-of-type'), finalSel);
 
     // 确认拦截 → 三个同款全消失
-    await ev(panel, `(() => { document.querySelector('.foot.three .primary')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .primary')?.click(); return true; })()`);
     await sleep(1800);
     const allHidden = await ev(page, `[...document.querySelectorAll('.dup')].every(e => getComputedStyle(e).display === 'none')`);
     check('⑦ 拦同类后三个同款全部消失', allHidden === true, String(allHidden));
@@ -538,7 +560,7 @@ async function importRulesFile(panel, filePath) {
 
 
     // 退出选择模式，恢复干净状态
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
     await sleep(900);
 
     // ═══════════ ⑨ 页面上不许出现文字标签（会挡住要点的东西）═══════════
@@ -602,20 +624,24 @@ async function importRulesFile(panel, filePath) {
         const list = Object.values(g.blockRules || {}).flat();
         return JSON.stringify({
             total: list.length,
-            conds: list.map((r) => r.condition?.value).filter(Boolean),
-            parts: list.find((r) => r.parts)?.parts?.length ?? 0,
+            texts: list.map((r) => r.pattern?.text).filter(Boolean),
+            legacy: list.map((r) => r.condition?.value).filter(Boolean),
+            nested: list.some((r) => r.pattern?.children?.[0]?.selector === '.ad-wrap'),
+            strict: list.filter((r) => r.strict).length,
         });
     })()`);
     const imp = JSON.parse(imported);
     console.log('   · 导入结果:', imported);
-    check('⑧b 导入保留条件规则', imp.conds.includes('广告'), JSON.stringify(imp.conds));
-    check('⑧b 导入保留组合规则（2 段）', imp.parts === 2, String(imp.parts));
+    check('⑧b 导入把旧文字条件迁移成 pattern.text', imp.texts.includes('广告'), JSON.stringify(imp.texts));
+    check('⑧b 本地已有的旧格式规则原样保留', imp.legacy.includes('推广'), JSON.stringify(imp.legacy));
+    check('⑧b 导入把旧组合规则迁移成嵌套 children', imp.nested === true, imported);
+    check('⑧b 旧组合规则迁移后 strict=true', imp.strict === 1, String(imp.strict));
     check('⑧b 同选择器不同条件的规则没互相覆盖', imp.total === 3, `${imp.total} 条`);
     // 清空，别影响后面的用例
     await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
     await sleep(500);
 
-    // ═══════════ ⑩ 加条件：外层选一类，内层点条件 ═══════════
+    // ═══════════ ⑩ 偷懒模式：锚点内任意层含「广告」就拦 ═══════════
     await page.send('Page.reload');
     await sleep(2200);
     await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
@@ -652,53 +678,32 @@ async function importRulesFile(panel, filePath) {
     console.log('   · 选中后选择器:', selBefore);
     check('⑩ 选中一类卡片，命中 6', /feed-item/.test(selBefore), selBefore);
 
-    // 点「+ 加条件」
-    const condBtn = await ev(panel, `(() => {
-        const b = [...document.querySelectorAll('.mini-btn')].find(x => /加条件/.test(x.innerText));
-        if (!b) return 'none';
-        b.click();
-        return b.innerText.trim();
-    })()`);
-    check('⑩ 有「+ 加条件」按钮', /加条件/.test(condBtn), String(condBtn));
-    await sleep(1200);
-
-    const waiting = await ev(panel, `document.body.innerText.includes('去页面上点一下')`);
-    check('⑩ 点后进入"去页面上点一下"状态', waiting === true);
-
-    // 在**广告卡片的角标**上点一下
-    const badge = await ev(page, `(() => {
-        const el = document.querySelector('.feed-item.is-ad .feed-badge');
-        const r = el.getBoundingClientRect();
-        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
-    })()`);
-    const bd = JSON.parse(badge);
-    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: bd.x, y: bd.y, button: 'left', clickCount: 1 });
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: bd.x, y: bd.y, button: 'left', clickCount: 1 });
-    await sleep(1400);
-
-    const opts = await ev(panel, `JSON.stringify([...document.querySelectorAll('.cond-opt')].map(b => b.innerText.replace(/\s+/g,' ').trim()))`);
-    console.log('   · 候选条件:', opts);
-    check('⑩ 算出了候选条件', JSON.parse(opts).length > 0, opts);
-    check('⑩ 第一个候选是「含文字「广告」」', /含文字「广告」/.test(JSON.parse(opts)[0] || ''), JSON.parse(opts)[0] || '');
-    check('⑩ 候选带命中数 2 / 6', /2 \/ 6/.test(JSON.parse(opts)[0] || ''), JSON.parse(opts)[0] || '');
-
-    // 选它
-    await ev(panel, `(() => {
-        const b = [...document.querySelectorAll('.cond-opt')].find(x => /含文字「广告」/.test(x.innerText));
-        b && b.click();
-        return true;
-    })()`);
-    await sleep(1000);
+    // ③ 偷懒模式：不用勾任何子标签，直接在锚点这一行填「广告」
+    //    —— 这正是「副标签里任意层出现这两个字就拦」的最低操作成本
+    const filled = await setInput(panel, '.compose-anchor .compose-text', '广告');
+    check('⑩ 锚点行可以直接填文字条件', filled === true);
+    await sleep(900);
 
     const condShown = await ev(panel, `document.querySelector('.cond-on')?.innerText.trim() ?? ''`);
     check('⑩ 条件已生效并显示', /含「广告」/.test(condShown), condShown);
 
-    const marked = await ev(page, `document.querySelectorAll('.__adc_match').length`);
+    const marked = await (async () => {
+        // 高亮是异步走消息的：等它从"同类 6 个"收敛到"真实命中 2 个"
+        for (let i = 0; i < 15; i++) {
+            await sleep(300);
+            const n = await ev(page, `document.querySelectorAll('.__adc_match').length`);
+            if (Number(n) === 2) return n;
+        }
+        return ev(page, `document.querySelectorAll('.__adc_match').length`);
+    })();
     check('⑩ 页面上只圈出符合条件的 2 个', Number(marked) === 2, `${marked} 个`);
 
+    const saveText = await ev(panel, `document.querySelector('.foot-row .primary')?.innerText.trim() ?? ''`);
+    check('⑩ 主按钮可点且写明「含文字」', /拦截这个/.test(saveText) && /含文字/.test(saveText), saveText);
+
     // 拦截
-    await ev(panel, `document.querySelector('.foot.three .primary')?.click()`);
-    await sleep(1600);
+    await savePick(panel);
+    await sleep(2200);
     const states = await ev(page, `JSON.stringify({
         ads: [...document.querySelectorAll('.feed-item.is-ad')].map(e => getComputedStyle(e).display),
         normals: [...document.querySelectorAll('.feed-item:not(.is-ad)')].map(e => getComputedStyle(e).display),
@@ -710,9 +715,9 @@ async function importRulesFile(panel, filePath) {
 
     const savedCond = await ev(panel, `(async () => {
         const g = await chrome.storage.local.get('blockRules');
-        return JSON.stringify(Object.values(g.blockRules || {}).flat().map(r => r.condition || null));
+        return JSON.stringify(Object.values(g.blockRules || {}).flat().map(r => ({ text: r.pattern?.text ?? null, strict: !!r.strict })));
     })()`);
-    check('⑩ 存下来的规则带条件', /"type":"text"/.test(savedCond) && /广告/.test(savedCond), savedCond);
+    check('⑩ 存下来的规则带 pattern.text（不是旧 condition）', /"text":"广告"/.test(savedCond) && /"strict":false/.test(savedCond), savedCond);
 
     // 规则列表的命中数必须按"条件过滤后"算，不能按同类总数 6 算
     await sleep(2600);
@@ -748,7 +753,7 @@ async function importRulesFile(panel, filePath) {
     const afterLeave = await ev(page, `JSON.stringify([...document.querySelectorAll('.feed-item.is-ad')].map((e) => getComputedStyle(e).display))`);
     check('⑩ 移开鼠标后条件规则重新隐藏', JSON.parse(afterLeave).every((d) => d === 'none'), afterLeave);
 
-    // ═══════════ ⑪ 组合标签规则：勾几层 → 一条规则 ═══════════
+    // ═══════════ ⑪ 精确模式：锚点 + 条件 + 严格层级 ═══════════
     await page.send('Page.reload');
     await sleep(2000);
     await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
@@ -761,92 +766,160 @@ async function importRulesFile(panel, filePath) {
     const chkCount = await ev(panel, `document.querySelectorAll('.tree .row .chk').length`);
     check('⑪ 树里每个标签左边有复选框', Number(chkCount) > 0, `${chkCount} 个`);
 
-    // 勾选三层：ad-box → ad-wrap → ad-inner
+    // 锚点 = ad-box：先在树里选中它（蓝色当前行）
+    const anchorPicked = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
+        if (!r) return false;
+        r.querySelector('.name').click();
+        return true;
+    })()`);
+    check('⑪ 能在树里选中锚点 ad-box', anchorPicked === true);
+    await sleep(700);
+
+    // 勾选锚点内部的两层：ad-wrap → ad-inner
     const picked = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const want = ['ad-box', 'ad-wrap', 'ad-inner'];
         let n = 0;
-        for (const key of want) {
-            const r = rows.find((x) => {
-                const t = x.querySelector('.name')?.textContent ?? '';
-                return t.includes(key) && !x.__done;
-            });
+        for (const key of ['ad-wrap', 'ad-inner']) {
+            const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes(key));
             if (!r) continue;
-            r.__done = true;
             r.querySelector('.chk').click();
             n++;
         }
         return n;
     })()`);
-    console.log('   · 勾选:', picked, '| .chk.on:', await ev(panel, `document.querySelectorAll('.tree .chk.on').length`), '| compose:', await ev(panel, `!!document.querySelector('.compose')`), '| footer exists:', await ev(panel, `!!document.querySelector('.foot')`));
-    check('⑪ 能勾多层', Number(picked) === 3, `${picked} 层`);
-    await sleep(600);
+    check('⑪ 能勾锚点内部的两层', Number(picked) === 2, `${picked} 层`);
+    await sleep(900);
 
-    const chainText = await ev(panel, `document.querySelector('.compose-parts')?.innerText.replace(/\\s+/g,' ').trim() ?? ''`);
-    console.log('   · 组合链:', chainText);
-    check('⑪ 显示了组合链（含层级差）', /▸1/.test(chainText), chainText);
+    const condRows = await ev(panel, `[...document.querySelectorAll('.compose-part .compose-sel')].map(e => e.innerText)`);
+    check('⑪ 条件区列出两段', condRows.length === 2, JSON.stringify(condRows));
 
-    await ev(panel, `(() => {
-        const b = [...document.querySelectorAll('.compose-actions .primary')].find((x) => /组合成规则/.test(x.textContent));
-        b && b.click();
-        return true;
-    })()`);
-    await sleep(1600);
+    const looseHit = await waitInfo(panel, '命中', (v) => v === '1 个元素');
+    check('⑪ 非严格模式（任意层）命中 1 个容器', looseHit === '1 个元素', looseHit);
+
+    // 打开「严格限制层级关系」：正确的层级（1 / 1）仍然命中
+    await ev(panel, `document.querySelector('.compose-strict input').click()`);
+    await sleep(1100);
+    const strictDepths = await ev(panel, `[...document.querySelectorAll('.compose-depth')].map(e => e.value)`);
+    check('⑪ 严格模式为每个条件显示层级输入', strictDepths.length === 2 && strictDepths.every((v) => v === '1'), JSON.stringify(strictDepths));
+    const strictHit = await waitInfo(panel, '命中', (v) => v === '1 个元素');
+    check('⑪ 严格模式层级正确时命中 1 个', strictHit === '1 个元素', strictHit);
+
+    const saveText11 = await ev(panel, `document.querySelector('.foot-row .primary')?.innerText.trim() ?? ''`);
+    check('⑪ 主按钮写明条件数量', /2 个条件/.test(saveText11), saveText11);
+
+    await savePick(panel);
+    await sleep(2400);
 
     const partsSaved = await ev(panel, `(async () => {
         const g = await chrome.storage.local.get('blockRules');
         const list = Object.values(g.blockRules || {}).flat();
-        return JSON.stringify(list.map((r) => ({ parts: r.parts || null })));
+        return JSON.stringify(list.map((r) => ({ strict: !!r.strict, pattern: r.pattern, label: r.label })));
     })()`);
     console.log('   · 保存的规则:', partsSaved);
-    check('⑪ 存成了一条三段式规则', (partsSaved.match(/relDepth/g) || []).length === 3, partsSaved);
+    {
+        const list = JSON.parse(partsSaved);
+        const r = list[0] ?? {};
+        const c1 = r.pattern?.children?.[0];
+        const c2 = c1?.children?.[0];
+        check('⑪ 存成一条嵌套条件树（ad-box → ad-wrap → ad-inner）',
+            r.pattern?.selector === 'div.ad-box' && c1?.selector === 'div.ad-wrap' && c2?.selector === 'div.ad-inner',
+            partsSaved);
+        check('⑪ 严格层级 relDepth 都存成 1', c1?.relDepth === 1 && c2?.relDepth === 1, partsSaved);
+        check('⑪ 规则标记 strict=true', r.strict === true, String(r.strict));
+        check('⑪ 规则文案显示层级标记 ▸1', /▸1/.test(r.label || ''), r.label || '');
+    }
 
     const hiddenByParts = await ev(page, `getComputedStyle(document.querySelector('.ad-box')).display`);
     check('⑪ 组合规则生效，外层容器被隐藏', hiddenByParts === 'none', hiddenByParts);
 
-    // ═══════════ ⑪b 编辑组合规则：勾选状态要复现 ═══════════
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
-    await sleep(1200);
+    // ═══════════ ⑪b 编辑组合规则：锚点 / 勾选 / 严格开关都要复现 ═══════════
+    await sleep(1800);
     const clickedEdit = await ev(panel, `(() => {
-        const row = [...document.querySelectorAll('.rule')].find((r) => /3 层组合/.test(r.innerText));
+        const row = [...document.querySelectorAll('.rule')].find((r) => /ad-box/.test(r.innerText));
         if (!row) return false;
         row.querySelector('.icon[title="编辑"]')?.click();
         return true;
     })()`);
     check('⑪b 规则列表里能找到组合规则并点编辑', clickedEdit === true);
-    await sleep(1800);
+    await sleep(2400);
 
-    const checkedCount = await ev(panel, `document.querySelectorAll('.tree .chk.on').length`);
-    const partCount = await ev(panel, `document.querySelectorAll('.compose-parts .compose-part').length`);
-    check('⑪b 编辑时复现 3 个勾选标签', Number(checkedCount) === 3, `${checkedCount} 个`);
-    check('⑪b 组合区复现 3 段', Number(partCount) === 3, `${partCount} 段`);
-
-    const curView = await ev(panel, `(() => {
+    const editState = JSON.parse(await ev(panel, `(() => {
         const box = document.querySelector('.tree');
         const row = box?.querySelector('.row.current');
-        if (!box || !row) return 'none';
-        const rb = row.getBoundingClientRect();
-        const tb = box.getBoundingClientRect();
+        const rb = row?.getBoundingClientRect();
+        const tb = box?.getBoundingClientRect();
         return JSON.stringify({
-            visible: rb.top >= tb.top - 1 && rb.bottom <= tb.bottom + 1,
-            bg: getComputedStyle(row).backgroundColor,
+            anchor: document.querySelector('.compose-anchor .compose-sel')?.innerText ?? '',
+            strict: !!document.querySelector('.compose-strict input')?.checked,
+            checks: document.querySelectorAll('.tree .chk.on').length,
+            rows: [...document.querySelectorAll('.compose-part .compose-sel')].map((e) => e.innerText),
+            depths: [...document.querySelectorAll('.compose-depth')].map((e) => e.value),
+            visible: !!(rb && tb && rb.top >= tb.top - 1 && rb.bottom <= tb.bottom + 1),
+            bg: row ? getComputedStyle(row).backgroundColor : '',
         });
+    })()`));
+    console.log('   · 编辑复现:', JSON.stringify(editState));
+    check('⑪b 锚点复现为 ad-box', /ad-box/.test(editState.anchor), editState.anchor);
+    check('⑪b 严格开关复现为开', editState.strict === true, String(editState.strict));
+    check('⑪b 复现 2 个勾选条件（锚点本身不勾）', editState.checks === 2, `${editState.checks} 个`);
+    check('⑪b 条件区复现 2 段', editState.rows.length === 2, JSON.stringify(editState.rows));
+    check('⑪b 层级输入复现为 1 / 1', editState.depths.every((v) => v === '1') && editState.depths.length === 2, JSON.stringify(editState.depths));
+    check('⑪b 选中的标签滚进了可视范围', editState.visible === true, String(editState.visible));
+    check('⑪b 选中行有明显背景高亮', editState.bg && editState.bg !== 'rgba(0, 0, 0, 0)', editState.bg);
+
+    // 退出编辑
+    await cancelPick(panel);
+    await sleep(900);
+
+    // ═══════════ ⑪c 严格层级真的会拒绝错误层级 ═══════════
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(1000);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(800);
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
+        r?.querySelector('.name')?.click();
+        return !!r;
     })()`);
-    console.log('   · 编辑时当前行:', curView);
-    {
-        const v = JSON.parse(curView);
-        check('⑪b 选中的标签滚进了可视范围', v.visible === true, curView);
-        check('⑪b 选中行有明显背景高亮', v.bg && v.bg !== 'rgba(0, 0, 0, 0)', v.bg);
-    }
+    await sleep(700);
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('ad-inner'));
+        r?.querySelector('.chk')?.click();
+        return !!r;
+    })()`);
+    await sleep(800);
+    await ev(panel, `document.querySelector('.compose-strict input').click()`);
+    await sleep(900);
 
-    // 退出编辑，交给 ⑫ 继续
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    // ad-inner 在 ad-box 下面第 2 层；填 1 应该一个都不命中
+    await setInput(panel, '.compose-depth', '1');
+    await sleep(1100);
+    const wrongDepthHit = await waitInfo(panel, '命中', (v) => v === '0 个元素');
+    check('⑪c 严格第 1 层时 ad-inner 不匹配（0 个）', wrongDepthHit === '0 个元素', wrongDepthHit);
+
+    await setInput(panel, '.compose-depth', '2');
+    await sleep(1100);
+    const rightDepthHit = await waitInfo(panel, '命中', (v) => v === '1 个元素');
+    check('⑪c 改成第 2 层后命中 1 个', rightDepthHit === '1 个元素', rightDepthHit);
+
+    // 关掉严格 → 任意层，又变回命中 1 个
+    await ev(panel, `document.querySelector('.compose-strict input').click()`);
+    await sleep(1100);
+    const looseAgain = await waitInfo(panel, '命中', (v) => v === '1 个元素');
+    check('⑪c 关掉严格后按任意层命中 1 个', looseAgain === '1 个元素', looseAgain);
+
+    await cancelPick(panel);
     await sleep(800);
 
-    // ═══════════ ⑫ 组合规则 + 文字约束（同类里靠文字区分） ═══════════
-    // 先把 ⑪ 留下的选择模式退掉，否则 .primary 是「拦截这个」
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
-    await sleep(800);
+    // ═══════════ ⑫ 条件 + 文字：同类卡片里只拦带「广告」的 ═══════════
     await page.send('Page.reload');
     await sleep(2000);
     await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
@@ -862,66 +935,111 @@ async function importRulesFile(panel, filePath) {
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ft.x, y: ft.y, button: 'none' });
     await sleep(900);
 
-    // 勾两层：div.feed-item → div.feed-cover（同类里文字不同）
+    // 锚点 = feed-item；勾选它内部的 feed-cover 作为条件
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('feed-item'));
+        r?.querySelector('.name')?.click();
+        return !!r;
+    })()`);
+    await sleep(700);
     const picked2 = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        let n = 0;
-        for (const key of ['feed-item', 'feed-cover']) {
-            const r = rows.find((x) => {
-                const t = x.querySelector('.name')?.textContent ?? '';
-                return t.includes(key) && !x.__d;
-            });
-            if (!r) continue;
-            r.__d = true;
-            r.querySelector('.chk').click();
-            n++;
-        }
-        return n;
+        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('feed-cover'));
+        if (!r) return false;
+        r.querySelector('.chk').click();
+        return true;
     })()`);
-    check('⑫ 勾选两层（feed-item → feed-cover）', Number(picked2) === 2, `${picked2} 层`);
-    await sleep(500);
+    check('⑫ 勾选 feed-cover 作为条件', picked2 === true);
+    await sleep(700);
 
     // 树里显示节点的文字内容
     const nodeTextShown = await ev(panel, `[...document.querySelectorAll('.tree .txt')].length > 0`);
     check('⑫ 树里显示节点的文字内容', nodeTextShown === true);
 
-    // 第二段加文字约束「广告」
-    await ev(panel, `(() => {
-        const inputs = [...document.querySelectorAll('.compose-text')];
-        const i = inputs[1];
-        if (!i) return false;
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        setter.call(i, '广告');
-        i.dispatchEvent(new Event('input', { bubbles: true }));
-        return true;
-    })()`);
-    await sleep(500);
+    // 条件加文字约束「广告」，并打开严格层级（feed-cover 正好在第 1 层）
+    await setInput(panel, '.compose-part .compose-text', '广告');
+    await ev(panel, `document.querySelector('.compose-strict input').click()`);
+    await sleep(1100);
 
-    await ev(panel, `(() => {
-        const b = [...document.querySelectorAll('.compose-actions .primary')].find((x) => /组合成规则/.test(x.textContent));
-        b && b.click();
-        return true;
-    })()`);
-    await sleep(1600);
+    const draftHit = await waitInfo(panel, '命中', (v) => v === '2 个元素');
+    check('⑫ 草稿命中数按「第 1 层 feed-cover 含广告」算（2 个）', draftHit === '2 个元素', draftHit);
+
+    await savePick(panel);
+    await sleep(2400);
 
     const savedParts = await ev(panel, `(async () => {
         const g = await chrome.storage.local.get('blockRules');
-        return JSON.stringify(Object.values(g.blockRules || {}).flat().map((r) => r.parts || null));
+        const list = Object.values(g.blockRules || {}).flat();
+        return JSON.stringify(list.map((r) => ({ pattern: r.pattern, strict: !!r.strict })));
     })()`);
     console.log('   · 规则:', savedParts);
-    check('⑫ 规则里带上了文字约束', /"text":"广告"/.test(savedParts), savedParts);
+    {
+        const list = JSON.parse(savedParts);
+        const c = list[0]?.pattern?.children?.[0];
+        check('⑫ 规则里带上了文字约束', c?.text === '广告', savedParts);
+        check('⑫ 条件带精确层级 relDepth=1', c?.relDepth === 1, savedParts);
+        check('⑫ 条件选择器是 feed-cover', /feed-cover/.test(c?.selector ?? ''), JSON.stringify(c));
+        check('⑫ 规则 strict=true', list[0]?.strict === true, String(list[0]?.strict));
+    }
 
     const st12 = JSON.parse(await ev(page, `JSON.stringify({
         ads: [...document.querySelectorAll('.feed-item.is-ad')].map((e) => getComputedStyle(e).display),
         normals: [...document.querySelectorAll('.feed-item:not(.is-ad)')].map((e) => getComputedStyle(e).display),
     })`));
-    console.log('   · 广告:', JSON.stringify(st12.ads), ' 普通:', JSON.stringify(st12.normals));
+    console.log('   · 广告:', JSON.stringify(st12.ads), '普通:', JSON.stringify(st12.normals));
     check('⑫ 只拦掉带「广告」字样的那 2 个', st12.ads.every((d) => d === 'none'), JSON.stringify(st12.ads));
     check('⑫ 普通卡片没被误杀', st12.normals.every((d) => d !== 'none'), JSON.stringify(st12.normals));
 
+    // 列表要在保存后异步刷新；等它真的出现，别用一个固定 sleep 赌
+    let label12 = '';
+    for (let i = 0; i < 20 && !label12; i++) {
+        await sleep(500);
+        label12 = await ev(panel, `[...document.querySelectorAll('.rule-label')].map(e => e.textContent).join('\\n')`);
+    }
+    let labelState = '';
+    if (!/feed-cover/.test(label12)) {
+        labelState = await ev(panel, `JSON.stringify({ picking: !!document.querySelector('.foot.three'), rules: document.querySelectorAll('.rule').length, labels: document.querySelectorAll('.rule-label').length, body: (document.body.textContent || '').replace(/\\s+/g,' ').slice(0, 220) })`);
+        const remote = await ev(panel, `(async () => {
+            const g = await chrome.storage.local.get('blockRules');
+            const rs = (g.blockRules['127.0.0.1'] || []).map((r) => ({ selector: r.selector, pattern: r.pattern, strict: !!r.strict }));
+            const t = (await chrome.tabs.query({})).find((x) => (x.url || '').includes('8941'));
+            const res = t ? await chrome.tabs.sendMessage(t.id, { type: 'adc:countRules', rules: rs }) : { noTab: true };
+            return JSON.stringify({ tab: t?.url, res });
+        })()`);
+        console.log('   · 列表诊断:', labelState, '| 页面计数:', remote);
+    }
+    check('⑫ 规则列表写出完整条件', /feed-cover/.test(label12) && /广告/.test(label12), label12 || `(列表为空) ${labelState}`);
+
+    // ═══════════ ⑫b 编辑带文字条件的规则：文字 / 勾选 / 严格层都要复现 ═══════════
+    const edit12 = await ev(panel, `(() => {
+        const row = [...document.querySelectorAll('.rule')].find((r) => /feed-cover/.test(r.innerText));
+        if (!row) return false;
+        row.querySelector('.icon[title="编辑"]')?.click();
+        return true;
+    })()`);
+    check('⑫b 能编辑带文字条件的规则', edit12 === true);
+    await sleep(2600);
+    const state12 = JSON.parse(await ev(panel, `JSON.stringify({
+        anchor: document.querySelector('.compose-anchor .compose-sel')?.textContent ?? '',
+        anchorText: document.querySelector('.compose-anchor .compose-text')?.value ?? '',
+        strict: !!document.querySelector('.compose-strict input')?.checked,
+        checks: document.querySelectorAll('.tree .chk.on').length,
+        texts: [...document.querySelectorAll('.compose-part .compose-text')].map((e) => e.value),
+        depths: [...document.querySelectorAll('.compose-depth')].map((e) => e.value),
+    })`) || '{}');
+    console.log('   · ⑫b 编辑复现:', JSON.stringify(state12));
+    check('⑫b 锚点复现为 feed-item', /feed-item/.test(state12.anchor), state12.anchor);
+    check('⑫b 条件文字「广告」复现', state12.texts.includes('广告'), JSON.stringify(state12.texts));
+    check('⑫b 严格开关复现为开', state12.strict === true, String(state12.strict));
+    check('⑫b 勾选的 feed-cover 复现', state12.checks === 1, `${state12.checks} 个`);
+    check('⑫b 层级复现为 1', state12.depths.every((v) => v === '1') && state12.depths.length === 1, JSON.stringify(state12.depths));
+    await cancelPick(panel);
+    await sleep(800);
+
     // ═══════════ ⑬ 锁定后鼠标滑向抽屉，树不许变 ═══════════
     // 先把上一段留下的选择模式退掉，否则 .primary 是「拦截这个」
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
     await sleep(800);
     await page.send('Page.reload');
     await sleep(2000);
@@ -956,7 +1074,7 @@ async function importRulesFile(panel, filePath) {
     check('⑬ 选择器也不变', afterSel13 === lockedSel13, `${lockedSel13} → ${afterSel13}`);
 
     // ═══════════ ⑭ 锁定后页面自己变化（懒加载/插广告），树也不许变 ═══════════
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
     await sleep(800);
     await page.send('Page.reload');
     await sleep(2000);
@@ -996,7 +1114,7 @@ async function importRulesFile(panel, filePath) {
     check('⑭ 树的当前行不变', curAfter === curBefore, `${curBefore.slice(0, 30)} → ${curAfter.slice(0, 30)}`);
 
     // ═══════════ ⑮ 选中的节点要在树里居中显示 ═══════════
-    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await ev(panel, `(() => { document.querySelector('.foot-row .ghost')?.click(); return true; })()`);
     await sleep(700);
     await page.send('Page.reload');
     await sleep(1800);
@@ -1125,11 +1243,8 @@ async function importRulesFile(panel, filePath) {
     const clicked21 = await ev(panel, `(() => {
         const c = document.querySelector('.tree');
         if (!c) return false;
-        const cb = c.getBoundingClientRect();
-        const row = [...c.querySelectorAll('.row')].find((r) => {
-            const b = r.getBoundingClientRect();
-            return b.top > cb.top + 40 && b.bottom < cb.bottom - 10 && r.querySelector('.name');
-        });
+        // 不要求整行都在可视区：面板变矮时树可能只剩几行，点任意一行都能验证"右侧操作不滚动"
+        const row = [...c.querySelectorAll('.row')].find((r) => r.querySelector('.name'));
         if (!row) return false;
         row.querySelector('.name').click();
         return true;

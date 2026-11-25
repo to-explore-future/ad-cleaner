@@ -1,6 +1,6 @@
-import { buildHideCss, loadRulesFor, loadSettings } from '@/utils/rules';
+import { buildHideCss, isAdvancedPattern, loadRulesFor, loadSettings, normalizeRule } from '@/utils/rules';
 import { ancestorChain, buildBroadSelector, buildSelector, countMatches, describeElement } from '@/utils/selector';
-import type { BlockRule, ElementInfo, RuleCondition, RulePart, Settings } from '@/utils/types';
+import type { BlockRule, ElementInfo, RuleCondition, RulePart, RulePattern, Settings } from '@/utils/types';
 
 /**
  * 页面侧的「选择器 + 规则执行器」。
@@ -77,7 +77,7 @@ let previewExclude: string | null = null;
  *    对「删除」来说是真把节点从 DOM 摘掉，恢复时按记录的原位置塞回去。
  *    它不是"只画个框"，用户看到的就是最终效果。
  */
-let draft: { selector: string; action: string } | null = null;
+let draft: { selector: string; action: string; advanced?: boolean } | null = null;
 /** 预览「删除」时摘下来的节点（记父节点 + 原来的下一个兄弟，才能原位塞回） */
 let removedForPreview: { node: Element; parent: Element; next: Node | null }[] = [];
 
@@ -98,7 +98,7 @@ function rewriteStyle(): void {
     const el = ensureStyleEl();
     if (!el) return;
     const hide = buildHideCss(rules, previewExclude ?? undefined);
-    const draftCss = draft && draft.action === 'hide' ? `\n${draft.selector}{display:none !important}` : '';
+    const draftCss = draft && draft.action === 'hide' && !draft.advanced ? `\n${draft.selector}{display:none !important}` : '';
     el.textContent =
         hide + draftCss +
         `\n.${OUTLINE_CLASS}.${OUTLINE_CLASS}{outline:2px dashed #f53f3f !important;outline-offset:-2px !important;` +
@@ -109,12 +109,14 @@ function rewriteStyle(): void {
         `\n.${BLOCKED_CLASS}.${BLOCKED_CLASS}{display:none !important}\n`;
 }
 
-/** 元素是否满足条件。 */
+/** 元素文本（用 innerText 优先，文本条件要的是"用户看到的字"） */
+function textOf(el: Element): string {
+    return (el as HTMLElement).innerText ?? el.textContent ?? '';
+}
+
+/** 元素是否满足条件（保留给「+ 加条件」的候选计算）。 */
 function meetsCondition(el: Element, c: RuleCondition): boolean {
-    if (c.type === 'text') {
-        const txt = (el as HTMLElement).innerText ?? el.textContent ?? '';
-        return txt.includes(c.value);
-    }
+    if (c.type === 'text') return textOf(el).includes(c.value);
     try {
         return !!el.querySelector(c.value);
     } catch {
@@ -122,37 +124,8 @@ function meetsCondition(el: Element, c: RuleCondition): boolean {
     }
 }
 
-/**
- * 执行「带条件」的规则。
- *
- * ⚠️ 为什么不能只靠 CSS：CSS 没法表达"这个元素内部包含「广告」两个字"，
- *    所以只能 JS 逐个判断，命中的打上 `__adc_blocked`（样式里 display:none）。
- */
-function applyConditionalRules(): void {
-    const list = rules.filter((r) => r.enabled && r.condition);
-    document.querySelectorAll(`.${BLOCKED_CLASS}`).forEach((el) => el.classList.remove(BLOCKED_CLASS));
-    if (list.length === 0) return;
-
-    for (const r of list) {
-        let targets: Element[] = [];
-        try {
-            targets = Array.from(document.querySelectorAll(r.selector));
-        } catch {
-            continue;
-        }
-        for (const el of targets) {
-            if (!meetsCondition(el, r.condition!)) continue;
-            // 悬浮预览时这些元素要临时显形，别被 MutationObserver 又藏回去
-            if (previewAdvanced && previewed.includes(el)) continue;
-            if (r.action === 'remove') el.remove();
-            else el.classList.add(BLOCKED_CLASS);
-        }
-    }
-}
-
-// ───────────────────────── 组合标签规则 ─────────────────────────
-
 function safeMatches(el: Element, selector: string): boolean {
+    if (selector === '*') return true;
     try {
         return el.matches(selector);
     } catch {
@@ -172,26 +145,32 @@ function descendantsAtDepth(el: Element, depth: number): Element[] {
     return level;
 }
 
+/** 某个元素的全部后代（不含自己） */
+function allDescendants(el: Element): Element[] {
+    const out: Element[] = [];
+    const walk = (p: Element) => {
+        for (const c of Array.from(p.children)) {
+            out.push(c);
+            walk(c);
+        }
+    };
+    walk(el);
+    return out;
+}
+
 /**
- * 组合规则是否命中。
+ * 统一条件树是否命中。
  *
- * ⚠️ 层级差**严格**校验：规则说"往下第 3 层是 .ad-wrap"，
- *    真实页面第 3 层换成别的东西 → 不命中（用户明确要这个语义）。
+ * strict=false：每个子条件在**锚点子树任意层**里找（偷懒模式）
+ * strict=true ：按 relDepth 精确到第 N 层（精确模式）
+ * children 之间是 AND；children 自己还能再套 children。
  */
-function matchesParts(root: Element, parts: RulePart[]): boolean {
-    let cur = root;
-    for (let i = 1; i < parts.length; i++) {
-        const p = parts[i];
-        const level = descendantsAtDepth(cur, p.relDepth);
-        const next = level.find(
-            (el) =>
-                safeMatches(el, p.selector) &&
-                // 文字约束：这一段必须包含指定文字（广告/时长 靠这个区分）
-                (!p.text ||
-                    ((el as HTMLElement).innerText ?? el.textContent ?? '').includes(p.text)),
-        );
-        if (!next) return false;
-        cur = next;
+function matchesPattern(el: Element, p: RulePattern, strict: boolean): boolean {
+    if (!safeMatches(el, p.selector)) return false;
+    if (p.text && !textOf(el).includes(p.text)) return false;
+    for (const c of p.children ?? []) {
+        const cands = strict ? descendantsAtDepth(el, Math.max(1, c.relDepth ?? 1)) : allDescendants(el);
+        if (!cands.some((x) => matchesPattern(x, c, strict))) return false;
     }
     return true;
 }
@@ -199,42 +178,41 @@ function matchesParts(root: Element, parts: RulePart[]): boolean {
 /** 只保留匹配需要的最小字段，面板可以整条规则发过来。 */
 interface MatchableRule {
     selector: string;
+    pattern?: RulePattern;
+    strict?: boolean;
+    /** @deprecated 旧格式兼容 */
     condition?: RuleCondition;
+    /** @deprecated 旧格式兼容 */
     parts?: RulePart[];
+}
+
+/** 把最小字段补成完整规则并迁移旧格式。 */
+function toNormalized(rule: MatchableRule): BlockRule {
+    return normalizeRule({
+        id: 'x', domain: '', selector: rule.selector, action: 'hide', enabled: true,
+        label: '', createdAt: 0,
+        ...(rule.pattern ? { pattern: rule.pattern } : {}),
+        strict: !!rule.strict,
+        ...(rule.condition ? { condition: rule.condition } : {}),
+        ...(rule.parts ? { parts: rule.parts } : {}),
+    });
 }
 
 /**
  * 一条规则**真正**会命中的元素。
  *
- * ⚠️ 不能只拿 `selector` 去 querySelectorAll：
- *    · 条件规则还要过文字/内部元素校验；
- *    · 组合规则要按层级差逐段走。
- *    以前命中数就是这么算错的（6 个卡片显示成 6，实际只拦 2 个广告）。
+ * 统一走条件树：普通规则就是没有文字/children 的单节点。
  */
 function elementsMatchingRule(rule: MatchableRule): Element[] {
-    if (rule.parts && rule.parts.length > 1) {
-        const head = rule.parts[0];
-        let anchors: Element[] = [];
-        try {
-            anchors = Array.from(document.querySelectorAll(head.selector));
-        } catch {
-            return [];
-        }
-        return anchors.filter((el) => {
-            if (head.text &&
-                !((el as HTMLElement).innerText ?? el.textContent ?? '').includes(head.text)) return false;
-            return matchesParts(el, rule.parts!);
-        });
-    }
-
-    let list: Element[] = [];
+    const n = toNormalized(rule);
+    const p = n.pattern!;
+    let anchors: Element[] = [];
     try {
-        list = Array.from(document.querySelectorAll(rule.selector));
+        anchors = Array.from(document.querySelectorAll(p.selector));
     } catch {
         return [];
     }
-    if (rule.condition) return list.filter((el) => meetsCondition(el, rule.condition!));
-    return list;
+    return anchors.filter((el) => matchesPattern(el, p, !!n.strict));
 }
 
 function countRuleMatches(rule: MatchableRule): number {
@@ -242,66 +220,56 @@ function countRuleMatches(rule: MatchableRule): number {
 }
 
 /**
- * 找回一条组合规则里每一段对应的树路径。
+ * 找回一条规则每个节点对应的树路径（按条件树的先序）。
  *
- * 用途：用户点「编辑」一条三段式规则时，面板要把当初勾选的那三个标签
- * **重新勾上**，而不是只选中第一段。路径按当前页面真实 DOM 算，
- * 页面上找不到就返回空数组（面板会提示规则已失效）。
+ * 用途：编辑规则时把当初勾选的标签重新勾上。
+ * strict 时按 relDepth 找，否则在子树里找第一个匹配的。
  */
-function partPaths(parts: RulePart[]): string[] {
-    if (!Array.isArray(parts) || parts.length < 2) return [];
-    const head = parts[0];
+function collectPatternPaths(
+    el: Element,
+    p: RulePattern,
+    strict: boolean,
+    out: { path: string; text: string }[],
+): boolean {
+    const path = elementPath(el);
+    if (!path) return false;
+    out.push({ path: keyOfPath(path), text: p.text ?? '' });
+    for (const c of p.children ?? []) {
+        const cands = strict ? descendantsAtDepth(el, Math.max(1, c.relDepth ?? 1)) : allDescendants(el);
+        const next = cands.find((x) => matchesPattern(x, c, strict));
+        if (!next) return false;
+        if (!collectPatternPaths(next, c, strict, out)) return false;
+    }
+    return true;
+}
+
+function patternPaths(rule: MatchableRule): { path: string; text: string }[] {
+    const n = toNormalized(rule);
+    const p = n.pattern!;
     let anchors: Element[] = [];
     try {
-        anchors = Array.from(document.querySelectorAll(head.selector));
+        anchors = Array.from(document.querySelectorAll(p.selector));
     } catch {
         return [];
     }
-    for (const anchor of anchors) {
-        if (head.text &&
-            !((anchor as HTMLElement).innerText ?? anchor.textContent ?? '').includes(head.text)) continue;
-        const p0 = elementPath(anchor);
-        if (!p0) continue;
-        const paths: string[] = [keyOfPath(p0)];
-        let cur = anchor;
-        let ok = true;
-        for (let i = 1; i < parts.length; i++) {
-            const p = parts[i];
-            const next = descendantsAtDepth(cur, p.relDepth).find(
-                (el) =>
-                    safeMatches(el, p.selector) &&
-                    (!p.text ||
-                        ((el as HTMLElement).innerText ?? el.textContent ?? '').includes(p.text)),
-            );
-            if (!next) { ok = false; break; }
-            const path = elementPath(next);
-            if (!path) { ok = false; break; }
-            paths.push(keyOfPath(path));
-            cur = next;
-        }
-        if (ok && paths.length === parts.length) return paths;
+    for (const el of anchors) {
+        if (!matchesPattern(el, p, !!n.strict)) continue;
+        const out: { path: string; text: string }[] = [];
+        if (collectPatternPaths(el, p, !!n.strict, out)) return out;
     }
     return [];
 }
 
-/** 把组合规则命中的元素标出来 / 删掉 */
-function applyPartRules(): void {
-    const list = rules.filter((r) => r.enabled && r.parts && r.parts.length > 1);
-    if (list.length === 0) return;
-
-    for (const r of list) {
-        let anchors: Element[] = [];
-        try {
-            anchors = Array.from(document.querySelectorAll(r.parts![0].selector));
-        } catch {
-            continue;
-        }
-        const head = r.parts![0];
-        for (const el of anchors) {
-            if (head.text &&
-                !((el as HTMLElement).innerText ?? el.textContent ?? '').includes(head.text)) continue;
-            if (!matchesParts(el, r.parts!)) continue;
-            // 同上：预览中的元素保持显形
+/**
+ * 统一执行所有"CSS 表达不了"的规则（文字条件 / 条件树）。
+ * 命中后打 __adc_blocked（CSS 里 display:none）或真删。
+ */
+function applyPatternRules(): void {
+    document.querySelectorAll(`.${BLOCKED_CLASS}`).forEach((el) => el.classList.remove(BLOCKED_CLASS));
+    for (const r of rules) {
+        if (!r.enabled || !isAdvancedPattern(r)) continue;
+        for (const el of elementsMatchingRule(r)) {
+            // 悬浮预览时这些元素要临时显形，别被 MutationObserver 又藏回去
             if (previewAdvanced && previewed.includes(el)) continue;
             if (r.action === 'remove') el.remove();
             else el.classList.add(BLOCKED_CLASS);
@@ -312,7 +280,8 @@ function applyPartRules(): void {
 /** 执行「删除」类规则（这些没法用 CSS 做，只能真删）。 */
 function applyRemovals(): void {
     for (const r of rules) {
-        if (!r.enabled || r.action !== 'remove') continue;
+        // 条件树的删除由 applyPatternRules 处理，别在这里按裸 selector 全删
+        if (!r.enabled || r.action !== 'remove' || isAdvancedPattern(r)) continue;
         try {
             document.querySelectorAll(r.selector).forEach((n) => n.remove());
         } catch { /* 选择器非法就跳过 */ }
@@ -323,26 +292,24 @@ function applyRemovals(): void {
 function applyAll(): void {
     rewriteStyle();
     applyRemovals();
-    applyConditionalRules();
-    applyPartRules();
+    applyPatternRules();
 }
 
-/** 页面是单页应用，节点会不断重挂 —— 用观察器兜住「删除」类规则。 */
+/** 页面是单页应用，节点会不断重挂 —— 用观察器兜住「删除」和条件树。 */
 let removeObserver: MutationObserver | null = null;
 let removeTimer: number | null = null;
 
 function watchRemovals(): void {
     if (removeObserver) return;
-    const hasRemoveRule = () =>
-        rules.some((r) => r.enabled && (r.action === 'remove' || !!r.condition || !!r.parts));
+    const hasWork = () =>
+        rules.some((r) => r.enabled && (r.action === 'remove' || isAdvancedPattern(r)));
     removeObserver = new MutationObserver(() => {
-        if (!hasRemoveRule()) return;
+        if (!hasWork()) return;
         if (removeTimer != null) return;
         removeTimer = window.setTimeout(() => {
             removeTimer = null;
             applyRemovals();
-            applyConditionalRules();
-            applyPartRules();
+            applyPatternRules();
         }, 200);
     });
     const start = () => {
@@ -475,6 +442,24 @@ function clearMatches(): void {
     for (const e of matchedEls) e.classList.remove('__adc_match');
     matchedEls = [];
     lastMatchSelector = '';
+}
+
+/**
+ * 把「当前草稿规则」真正会命中的元素标出来。
+ *
+ * 和 showMatches（整类同款）不同：条件/文字会把范围收窄，用户改一个字
+ * 就应该马上看到被拦的从 6 个变成 2 个 —— 这是保存前唯一的"真实影响范围"。
+ */
+function markByPattern(selector: string, pattern: RulePattern | undefined, strict: boolean): number {
+    clearMatches();
+    if (!pattern) return 0;
+    const list = elementsMatchingRule({ selector, pattern, strict });
+    if (list.length > 300) return list.length;
+    for (const el of list) {
+        el.classList.add('__adc_match');
+        matchedEls.push(el);
+    }
+    return list.length;
 }
 
 // ───────────────────────── DOM 树（F12 那种） ─────────────────────────
@@ -931,12 +916,11 @@ function onScrollResize(): void {
 /** 悬浮预览时，是否临时把"条件/组合规则"藏起来的元素显形了 */
 let previewAdvanced = false;
 
-/** 高亮某个选择器会命中的元素（已生效的规则要先临时显形）。 */
+/** 高亮某条规则会命中的元素（已生效的规则要先临时显形）。 */
 function previewSelector(
     selector: string,
     action: string,
-    condition?: RuleCondition,
-    parts?: RulePart[],
+    opts: { pattern?: RulePattern; strict?: boolean; condition?: RuleCondition; parts?: RulePart[] } = {},
 ): number {
     clearPreviewClasses();
     if (!selector) return 0;
@@ -952,14 +936,20 @@ function previewSelector(
 
     let list: Element[] = [];
     try {
-        // ⚠️ 不能只按 selector 标：条件/组合规则的真实命中范围更小。
-        //    以前悬浮一条"只拦 2 个广告"的规则，会把 6 个同类全标出来。
-        list = elementsMatchingRule({ selector, condition, parts });
+        // ⚠️ 不能只按 selector 标：文字/条件树的真实命中范围更小。
+        list = elementsMatchingRule({
+            selector,
+            pattern: opts.pattern,
+            strict: opts.strict,
+            condition: opts.condition,
+            parts: opts.parts,
+        });
     } catch {
         return -1;
     }
 
-    previewAdvanced = !!(condition || (parts && parts.length > 1));
+    previewAdvanced = !!(opts.condition || (opts.parts && opts.parts.length > 1) ||
+        (opts.pattern && (opts.pattern.text || (opts.pattern.children && opts.pattern.children.length))));
     for (const el of list) {
         // 条件/组合规则是靠 __adc_blocked 藏的，预览时要临时摘掉才看得见
         if (previewAdvanced) el.classList.remove(BLOCKED_CLASS);
@@ -980,8 +970,7 @@ function clearPreviewClasses(): void {
     // 高级规则预览时摘掉的隐藏类要补回去，否则移开鼠标后广告不会重新藏起来
     if (previewAdvanced) {
         previewAdvanced = false;
-        applyConditionalRules();
-        applyPartRules();
+        applyPatternRules();
     }
 }
 
@@ -994,13 +983,35 @@ function clearPreview(): void {
 }
 
 /** 真的把这条规则应用上去（预览效果）。返回影响到的元素数。 */
-function applyPreview(selector: string, action: string): number {
+function applyPreview(
+    selector: string,
+    action: string,
+    pattern?: RulePattern,
+    strict = false,
+): number {
     revertPreview();
     if (!selector) return 0;
-    draft = { selector, action };
+    const advanced = !!(pattern && (pattern.text || (pattern.children && pattern.children.length)));
+    draft = { selector, action, advanced };
     // 预览时把"圈出来"的标记全撤掉 —— 用户要看的是真实效果，不是示意图
     clearMatches();
     hideOverlay();
+
+    if (advanced) {
+        const list = elementsMatchingRule({ selector, pattern, strict });
+        if (action === 'remove') {
+            for (const el of list) {
+                const parent = el.parentElement;
+                if (!parent) continue;
+                removedForPreview.push({ node: el, parent, next: el.nextSibling });
+                el.remove();
+            }
+        } else {
+            for (const el of list) el.classList.add(BLOCKED_CLASS);
+        }
+        rewriteStyle();
+        return list.length;
+    }
 
     if (action === 'remove') {
         // 删除模式：真摘掉，并记住原位
@@ -1028,6 +1039,7 @@ function applyPreview(selector: string, action: string): number {
 /** 撤销预览，页面恢复原样。 */
 function revertPreview(): void {
     if (!draft && removedForPreview.length === 0) return;
+    const wasAdvanced = !!draft?.advanced;
     draft = null;
     // 逆序塞回，保证顺序正确
     for (let i = removedForPreview.length - 1; i >= 0; i--) {
@@ -1041,6 +1053,7 @@ function revertPreview(): void {
         } catch { /* 页面可能已经重排，忽略 */ }
     }
     removedForPreview = [];
+    if (wasAdvanced) applyPatternRules();
     rewriteStyle();
     // 预览结束后把高亮框恢复回来
     const el = currentEl();
@@ -1171,7 +1184,7 @@ async function reloadRules(): Promise<void> {
     if (!ctxAlive()) return;
     try {
         const d = domainOf(location.href);
-        rules = d ? await loadRulesFor(d) : [];
+        rules = d ? (await loadRulesFor(d)).map(normalizeRule) : [];
         settings = await loadSettings();
         applyAll();
     } catch (e) {
@@ -1209,7 +1222,12 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 sendResponse({ ok: true, picking });
                 return false;
             case 'adc:previewApply': {
-                const n = applyPreview(String(msg.selector ?? ''), String(msg.action ?? 'hide'));
+                const n = applyPreview(
+                    String(msg.selector ?? ''),
+                    String(msg.action ?? 'hide'),
+                    msg.pattern as RulePattern | undefined,
+                    !!msg.strict,
+                );
                 sendResponse({ ok: true, count: n, previewing: isPreviewing() });
                 return false;
             }
@@ -1236,6 +1254,15 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 startCondPick(String(msg.selector ?? ''));
                 sendResponse({ ok: true });
                 return false;
+            case 'adc:markPattern': {
+                const n = markByPattern(
+                    String(msg.selector ?? ''),
+                    msg.pattern as RulePattern | undefined,
+                    !!msg.strict,
+                );
+                sendResponse({ ok: true, count: n });
+                return false;
+            }
             case 'adc:markCondition': {
                 const n = markByCondition(
                     String(msg.selector ?? ''),
@@ -1276,8 +1303,12 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 const n = previewSelector(
                     String(msg.selector ?? ''),
                     String(msg.action ?? 'hide'),
-                    msg.condition as RuleCondition | undefined,
-                    msg.parts as RulePart[] | undefined,
+                    {
+                        pattern: msg.pattern as RulePattern | undefined,
+                        strict: !!msg.strict,
+                        condition: msg.condition as RuleCondition | undefined,
+                        parts: msg.parts as RulePart[] | undefined,
+                    },
                 );
                 sendResponse({ ok: true, count: n });
                 return false;
@@ -1296,9 +1327,17 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 return false;
             }
             case 'adc:selectBySelector': {
-                // 编辑已有规则：把它的目标元素重新选出来
+                // 编辑已有规则：把它的目标元素重新选出来。
+                // ⚠️ 条件规则不能只按 selector 选第一个 —— 第一个同类往往**不满足条件**
+                //    （信息流前几张是普通卡片），锚点会选错，编辑区一个条件都复现不出来。
+                const selStr = String(msg.selector ?? '');
+                const pat = msg.pattern as RulePattern | undefined;
                 try {
-                    const el = document.querySelector(String(msg.selector ?? ''));
+                    let el: Element | null = null;
+                    if (pat) {
+                        el = elementsMatchingRule({ selector: selStr, pattern: pat, strict: !!msg.strict })[0] ?? null;
+                    }
+                    if (!el) el = document.querySelector(selStr);
                     if (el) {
                         if (!picking) startPicker();
                         selectionOrigin = 'panel';
@@ -1312,13 +1351,28 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 }
                 return false;
             }
-            case 'adc:partPaths': {
-                // 编辑组合规则：把每一段对应的树路径找回来，并展开到它们
-                const paths = partPaths(Array.isArray(msg.parts) ? (msg.parts as RulePart[]) : []);
-                for (const p of paths) expandTo(pathOfKey(p));
+            case 'adc:patternPaths': {
+                // 编辑规则：把条件树每个节点对应的树路径找回来，并展开到它们
+                const selector = String(msg.selector ?? '');
+                const entries = patternPaths({
+                    selector,
+                    pattern: msg.pattern as RulePattern | undefined,
+                    strict: !!msg.strict,
+                });
+                for (const e of entries) expandTo(pathOfKey(e.path));
                 invalidateTree();
-                sendResponse({ ok: true, paths });
-                if (paths.length) notifyPanel();
+                sendResponse({ ok: true, entries, paths: entries.map((e) => e.path) });
+                if (entries.length) notifyPanel();
+                return false;
+            }
+            case 'adc:partPaths': {
+                // 旧消息兼容：parts → 条件树
+                const parts = Array.isArray(msg.parts) ? (msg.parts as RulePart[]) : [];
+                const entries = patternPaths({ selector: parts[0]?.selector ?? '', parts });
+                for (const e of entries) expandTo(pathOfKey(e.path));
+                invalidateTree();
+                sendResponse({ ok: true, entries, paths: entries.map((e) => e.path) });
+                if (entries.length) notifyPanel();
                 return false;
             }
             case 'adc:countAll': {

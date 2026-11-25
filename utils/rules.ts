@@ -1,9 +1,83 @@
-import type { BlockRule, RuleCondition, RulePart, Settings } from './types';
+import type { BlockRule, RuleCondition, RulePart, RulePattern, Settings } from './types';
 
 const RULES_KEY = 'blockRules';
 const SETTINGS_KEY = 'settings';
 
 export const DEFAULT_SETTINGS: Settings = { showEffect: true };
+
+// ───────────────────────── 统一规则模型 ─────────────────────────
+
+/** 深拷贝一份条件树，避免面板和内容脚本共享可变对象。 */
+function clonePattern(p: RulePattern): RulePattern {
+    return {
+        selector: p.selector,
+        ...(p.text ? { text: p.text } : {}),
+        ...(p.relDepth != null ? { relDepth: p.relDepth } : {}),
+        ...(p.children && p.children.length ? { children: p.children.map(clonePattern) } : {}),
+    };
+}
+
+/**
+ * 把旧规则迁移成统一模型。
+ *
+ * - 普通规则：pattern = { selector }
+ * - 旧条件规则：文字 → 锚点 text；内部元素 → 一个任意层的子条件
+ * - 旧组合规则：parts 链 → 嵌套 children，strict = true
+ *
+ * 迁移在**读入时**做，存储里的旧数据不动；用户下次编辑保存时才写成新格式。
+ */
+export function normalizeRule(rule: BlockRule): BlockRule {
+    const { condition, parts, ...rest } = rule;
+    if (rest.pattern) {
+        return { ...rest, strict: !!rest.strict, pattern: clonePattern(rest.pattern) };
+    }
+
+    let pattern: RulePattern = { selector: rule.selector };
+    let strict = false;
+
+    if (parts && parts.length > 0) {
+        let cur: RulePattern = {
+            selector: parts[0].selector,
+            ...(parts[0].text ? { text: parts[0].text } : {}),
+        };
+        pattern = cur;
+        for (let i = 1; i < parts.length; i++) {
+            const p = parts[i];
+            const child: RulePattern = {
+                selector: p.selector,
+                relDepth: Math.max(1, Math.round(p.relDepth || 1)),
+                ...(p.text ? { text: p.text } : {}),
+            };
+            cur.children = [child];
+            cur = child;
+        }
+        strict = true;
+    } else if (condition) {
+        if (condition.type === 'text') {
+            pattern.text = condition.value;
+        } else {
+            pattern.children = [{ selector: condition.value }];
+        }
+    }
+
+    return { ...rest, pattern, strict };
+}
+
+/** 这条规则是否必须走 JS 匹配（CSS 表达不了文字/条件树）。 */
+export function isAdvancedPattern(rule: Pick<BlockRule, 'pattern'>): boolean {
+    const p = rule.pattern;
+    return !!p && (!!p.text || !!(p.children && p.children.length));
+}
+
+/** 给人看的一句话规则描述。 */
+export function patternLabel(p: RulePattern, strict = false): string {
+    const own = p.text ? `${p.selector} 含「${p.text}」` : p.selector;
+    const kids = (p.children ?? []).map((c) => {
+        const depth = strict ? `▸${c.relDepth ?? 1}` : '▸任意层';
+        return `${depth}${patternLabel(c, strict)}`;
+    });
+    return kids.length ? `${own}（${kids.join('，')}）` : own;
+}
 
 /** 读全部规则（按域名分组）。 */
 export async function loadAllRules(): Promise<Record<string, BlockRule[]>> {
@@ -78,9 +152,8 @@ export async function saveSettings(s: Settings): Promise<void> {
  */
 export function buildHideCss(rules: BlockRule[], excludeSelector?: string): string {
     const sels = rules
-        // 带条件的规则 CSS 表达不了（CSS 没有"包含文字"），交给页面脚本处理
-        // 带条件 / 组合标签的规则 CSS 表达不了，交给页面脚本处理
-        .filter((r) => r.enabled && r.action === 'hide' && !r.condition && !r.parts)
+        // 带文字/条件树的规则 CSS 表达不了，交给页面脚本处理
+        .filter((r) => r.enabled && r.action === 'hide' && !isAdvancedPattern(r))
         .map((r) => r.selector)
         .filter((s) => s && s !== excludeSelector);
     if (sels.length === 0) return '';
@@ -150,18 +223,49 @@ function sanitizeParts(raw: unknown): RulePart[] | undefined {
     return out;
 }
 
+/** 校验统一条件树；任何一层不合法就整条不认（避免半条规则误拦）。 */
+function sanitizePattern(raw: unknown, depth = 0): RulePattern | undefined {
+    if (!raw || typeof raw !== 'object' || depth > 12) return undefined;
+    const p = raw as Partial<RulePattern>;
+    if (typeof p.selector !== 'string' || !p.selector) return undefined;
+
+    const text = typeof p.text === 'string' && p.text ? p.text.slice(0, 80) : undefined;
+
+    let relDepth: number | undefined;
+    if (p.relDepth != null) {
+        const n = Number(p.relDepth);
+        if (!Number.isInteger(n) || n < 1) return undefined;
+        relDepth = n;
+    }
+
+    let children: RulePattern[] | undefined;
+    if (Array.isArray(p.children) && p.children.length > 0) {
+        if (p.children.length > 20) return undefined;
+        children = [];
+        for (const c of p.children) {
+            const s = sanitizePattern(c, depth + 1);
+            if (!s) return undefined;
+            children.push(s);
+        }
+    }
+
+    return {
+        selector: p.selector,
+        ...(text ? { text } : {}),
+        ...(relDepth != null ? { relDepth } : {}),
+        ...(children ? { children } : {}),
+    };
+}
+
 /**
  * 合并时判断"是不是同一条规则"。
  *
  * 不能只看 selector：同一类卡片可以有一条"含广告"的条件规则和一条普通规则，
- * 只按 selector 合并会让它们互相覆盖。条件 + 组合都要算进身份。
+ * 只按 selector 合并会让它们互相覆盖。迁移后的完整条件树才是身份。
  */
-function ruleIdentity(rule: Pick<BlockRule, 'selector' | 'condition' | 'parts'>): string {
-    return [
-        rule.selector,
-        rule.condition ? `${rule.condition.type}:${rule.condition.value}` : '',
-        rule.parts ? JSON.stringify(rule.parts) : '',
-    ].join('\u0000');
+function ruleIdentity(rule: BlockRule): string {
+    const n = normalizeRule(rule);
+    return JSON.stringify({ p: n.pattern, s: !!n.strict });
 }
 
 /**
@@ -187,20 +291,28 @@ export async function importRules(text: string): Promise<{ added: number; update
         if (!Array.isArray(list)) continue;
         const existing = all[domain] ?? [];
         for (const r of list) {
-            if (!r || typeof r.selector !== 'string' || !r.selector) continue;
+            const pattern = sanitizePattern(r.pattern);
+            const selector = typeof r.selector === 'string' && r.selector
+                ? r.selector
+                : pattern?.selector ?? '';
+            if (!selector) continue;
             const condition = sanitizeCondition(r.condition);
             const parts = sanitizeParts(r.parts);
-            const rule: BlockRule = {
+            const base: BlockRule = {
                 id: r.id || newRuleId(),
                 domain,
-                selector: r.selector,
+                selector,
                 action: r.action === 'remove' ? 'remove' : 'hide',
                 enabled: r.enabled !== false,
-                label: r.label || r.selector,
+                label: r.label || selector,
                 createdAt: r.createdAt || Date.now(),
                 ...(condition ? { condition } : {}),
                 ...(parts ? { parts } : {}),
+                ...(pattern ? { pattern } : {}),
+                strict: !!r.strict,
             };
+            // 旧格式（condition/parts）在这里统一迁移成 pattern
+            const rule = normalizeRule(base);
             const key = ruleIdentity(rule);
             const i = existing.findIndex((x) => ruleIdentity(x) === key);
             if (i >= 0) {
@@ -220,18 +332,16 @@ export async function importRules(text: string): Promise<{ added: number; update
 
 /** 规则的语法写法（给用户看，以后分享也用这个格式）。 */
 export function ruleToSyntax(rule: BlockRule): string {
-    const base = `${rule.domain}##${rule.selector}`;
-    if (!rule.condition) return base;
-    return rule.condition.type === 'text'
-        ? `${rule.selector}|text("${rule.condition.value}")`
-        : `${rule.selector}|has(${rule.condition.value})`;
+    const n = normalizeRule(rule);
+    if (!n.pattern) return `${n.domain}##${n.selector}`;
+    return `${n.domain}##${patternLabel(n.pattern, !!n.strict)}`;
 }
 
 /** 规则的一句话描述（列表里显示）。 */
 export function ruleToLabel(rule: BlockRule): string {
-    if (!rule.condition) return rule.label || rule.selector;
-    const what = rule.condition.type === 'text'
-        ? `含「${rule.condition.value}」`
-        : `含 ${rule.condition.value}`;
-    return `${rule.label || rule.selector} ${what}`;
+    const n = normalizeRule(rule);
+    if (n.pattern && (n.pattern.text || (n.pattern.children && n.pattern.children.length))) {
+        return patternLabel(n.pattern, !!n.strict);
+    }
+    return n.label || n.selector;
 }

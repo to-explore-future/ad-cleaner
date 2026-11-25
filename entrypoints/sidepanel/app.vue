@@ -2,9 +2,10 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
     deleteRule, exportAllRules, importRules, loadRulesFor, loadSettings,
-    newRuleId, saveSettings, setRuleEnabled, upsertRule,
+    newRuleId, normalizeRule, patternLabel, ruleToLabel, saveSettings,
+    setRuleEnabled, upsertRule,
 } from '@/utils/rules';
-import type { BlockRule, ElementInfo, Settings } from '@/utils/types';
+import type { BlockRule, ElementInfo, RulePattern, Settings } from '@/utils/types';
 
 // ───────────────────────── 状态 ─────────────────────────
 
@@ -27,7 +28,12 @@ const ruleFilter = ref<'page' | 'site'>('page');
 /** 当前该显示的规则 */
 const visibleRules = computed(() => {
     if (ruleFilter.value === 'site' || !countsReady.value) return rules.value;
-    return rules.value.filter((r) => (counts.value[r.id] ?? 0) > 0);
+    // 命中数未知（-1，消息刚失败/页面还在加载）时不要藏规则；
+    // 只有明确算出 0 才归到「本页没有」——不然刚保存的规则会瞬间消失。
+    return rules.value.filter((r) => {
+        const c = counts.value[r.id];
+        return c == null || c !== 0;
+    });
 });
 
 /** 本页命中了几条（给标签上的数字用） */
@@ -40,7 +46,8 @@ const settings = ref<Settings>({ showEffect: true });
 const picking = ref(false);
 const editingId = ref<string | null>(null);
 /** 完整 DOM 树（扁平化后的一串节点） */
-const tree = ref<{ path: string; depth: number; tag: string; id: string; classes: string[]; hasChildren: boolean; expanded: boolean; current: boolean; text: string; html: string }[]>([]);
+type TreeRow = { path: string; depth: number; tag: string; id: string; classes: string[]; hasChildren: boolean; expanded: boolean; current: boolean; text: string; html: string };
+const tree = ref<TreeRow[]>([]);
 const currentPath = ref('');
 /** 树里的源码是否换行显示（不换行时一行截断） */
 const wrapSource = ref(true);
@@ -112,7 +119,6 @@ const matchCount = ref(0);
  * 「加条件」：让规则更精细 —— 命中这个选择器、**并且**内部包含某个东西才拦。
  *   条件选法：点「+ 加条件」→ 去页面上点那个能区分广告的东西 → 挑一个候选
  */
-const condition = ref<{ type: 'text' | 'selector'; value: string } | null>(null);
 /** 正在等用户去页面上点条件 */
 const condPicking = ref(false);
 /** 点完之后算出来的候选 */
@@ -263,15 +269,19 @@ async function loadPage(): Promise<void> {
         pageUrl.value = tab?.url ?? '';
         domain.value = domainOf(pageUrl.value);
         settings.value = await loadSettings();
-        rules.value = canWork.value ? await loadRulesFor(domain.value) : [];
+        rules.value = canWork.value ? (await loadRulesFor(domain.value)).map(normalizeRule) : [];
         await refreshCounts();
     } catch (e) {
         console.warn('[广告拦截助手] 读取当前页面失败', e);
     }
 }
 
+/** 每次查询的代号：晚返回的旧查询不许覆盖新结果 */
+let countGen = 0;
+
 /** 问页面：这些选择器各命中几个元素。 */
 async function refreshCounts(): Promise<void> {
+    const gen = ++countGen;
     countsReady.value = false;
     if (!canWork.value || rules.value.length === 0) {
         counts.value = {};
@@ -290,10 +300,12 @@ async function refreshCounts(): Promise<void> {
         type: 'adc:countRules',
         rules: rules.value.map((r) => ({
             selector: r.selector,
-            condition: r.condition,
-            parts: r.parts,
+            pattern: r.pattern,
+            strict: !!r.strict,
         })),
     });
+    // 期间规则又变了（比如刚保存一条）→ 这份结果已经过期，丢掉
+    if (gen !== countGen) return;
     const out: Record<string, number> = {};
     rules.value.forEach((r, i) => {
         out[r.id] = res?.counts?.[i] ?? -1;
@@ -305,7 +317,9 @@ async function refreshCounts(): Promise<void> {
 // ───────────────────────── 规则操作 ─────────────────────────
 
 async function refreshRules(): Promise<void> {
-    rules.value = canWork.value ? await loadRulesFor(domain.value) : [];
+    rules.value = canWork.value ? (await loadRulesFor(domain.value)).map(normalizeRule) : [];
+    // 规则变了必须重算命中数：否则新规则 id 不在 counts 里，会被"本页"过滤掉
+    await refreshCounts();
 }
 
 async function onToggle(rule: BlockRule): Promise<void> {
@@ -330,8 +344,8 @@ async function onHoverRule(rule: BlockRule): Promise<void> {
         type: 'adc:preview',
         selector: rule.selector,
         action: rule.action,
-        condition: rule.condition,
-        parts: rule.parts,
+        pattern: rule.pattern,
+        strict: !!rule.strict,
     });
     if (res && res.count === -1) {
         showToast(rule.action === 'remove' ? '删除类规则无法预览' : '选择器已失效');
@@ -386,20 +400,26 @@ async function startCondPick(): Promise<void> {
     condPicking.value = true;
 }
 
-async function pickCondition(c: { type: 'text' | 'selector'; value: string }): Promise<void> {
-    const sel = finalSelector.value;
-    if (!sel) return;
-    condition.value = { type: c.type, value: c.value };
+function pickCondition(c: { type: 'text' | 'selector'; value: string }): void {
     condPicking.value = false;
     condCandidates.value = [];
-    await sendToTab({ type: 'adc:markCondition', selector: sel, condition: condition.value });
+    if (c.type === 'text') {
+        // 文字候选 = 锚点子树里出现这段字（偷懒模式）
+        anchorText.value = c.value;
+    } else {
+        // 元素候选 = 锚点内部要有这个元素（可再切严格层级）
+        manualConditions.value = [...manualConditions.value, { selector: c.value, relDepth: 1 }];
+    }
+    void refreshDraftCount();
 }
 
-async function clearCondition(): Promise<void> {
-    condition.value = null;
+function clearCondition(): void {
     condPicking.value = false;
     condCandidates.value = [];
-    await sendToTab({ type: 'adc:clearCondition' });
+    anchorText.value = '';
+    manualConditions.value = [];
+    void sendToTab({ type: 'adc:clearCondition' });
+    void refreshDraftCount();
 }
 
 // ───────────────────────── 导入 / 导出 ─────────────────────────
@@ -454,7 +474,6 @@ async function startPick(): Promise<void> {
     }
     editingId.value = null;
     pickAction.value = 'hide';
-    condition.value = null;
     condPicking.value = false;
     condCandidates.value = [];
     pickScope.value = 'one';
@@ -470,8 +489,8 @@ async function startPick(): Promise<void> {
     allowTreeUpdate.value = false;
     selector.value = '';
     matchCount.value = 0;
-    checkedPaths.value = new Set();
-    partTexts.value = [];
+    clearComposition();
+    editRootSelector.value = '';
     // 新一次选择：重新记基线，别把上一次的页面点选当成新的
     centerToken++;
 }
@@ -481,7 +500,6 @@ async function startEdit(rule: BlockRule): Promise<void> {
     pickAction.value = rule.action;
     previewing.value = false;
     pickScope.value = 'one';
-    previewing.value = false;
     scopeTouched.value = false;
     autoScoped.value = false;
     broadSelector.value = '';
@@ -493,37 +511,65 @@ async function startEdit(rule: BlockRule): Promise<void> {
     allowTreeUpdate.value = false;
     selector.value = '';
     matchCount.value = 0;
-    // 重新编辑时，先清掉上一次的勾选，避免旧规则的三段被带进来
-    checkedPaths.value = new Set();
-    partTexts.value = [];
-    // 编辑是右侧操作：不居中，重新记基线
+    // 重新编辑时先清空上一次的条件；编辑是右侧操作，不居中
+    clearComposition();
+    editRootSelector.value = rule.selector;
     centerToken++;
 
     const res = await sendToTabOrInject<{ ok: boolean }>({
-        type: 'adc:selectBySelector', selector: rule.selector,
+        type: 'adc:selectBySelector',
+        selector: rule.selector,
+        pattern: rule.pattern,
+        strict: !!rule.strict,
     });
     if (!res?.ok) {
         showToast('页面上已找不到这条规则的目标，请重新选一个');
         return;
     }
 
-    /**
-     * 组合规则要**复现当初勾选的每一层**。
-     * 只选中第一段是不够的：用户点编辑就是想看看这条规则是哪几层组成的。
-     */
-    if (rule.parts && rule.parts.length > 1) {
-        markTreeUpdate();
-        const pp = await sendToTab<{ ok: boolean; paths: string[] }>({
-            type: 'adc:partPaths', parts: rule.parts,
-        });
-        if (pp?.ok && pp.paths?.length === rule.parts.length) {
-            checkedPaths.value = new Set(pp.paths);
-            partTexts.value = rule.parts.map((p) => p.text ?? '');
-            markTreeUpdate();
-        } else {
-            showToast('这条组合规则在页面上已经对不上了，请重新勾选');
-        }
+    const pattern = rule.pattern;
+    if (!pattern || (!pattern.text && !(pattern.children && pattern.children.length))) return;
+
+    /** 恢复严格开关 / 锚点文字 / 每个条件的勾选和文字 */
+    strictMode.value = !!rule.strict;
+    anchorText.value = pattern.text ?? '';
+    markTreeUpdate();
+    const pp = await sendToTab<{ ok: boolean; entries: { path: string; text: string }[] }>({
+        type: 'adc:patternPaths',
+        selector: rule.selector,
+        pattern,
+        strict: !!rule.strict,
+    });
+    if (!pp?.ok || !pp.entries?.length) {
+        showToast('这条规则在页面上已经对不上了，请重新勾选');
+        return;
     }
+
+    const children = patternChildren(pattern);
+    const entries = pp.entries.slice(1);
+    checkedPaths.value = new Set(entries.map((e) => e.path));
+    const texts: Record<string, string> = {};
+    const depths: Record<string, number> = {};
+    entries.forEach((e, i) => {
+        texts[e.path] = e.text ?? '';
+        depths[e.path] = Math.max(1, children[i]?.relDepth ?? 1);
+    });
+    textByPath.value = texts;
+    relDepthByPath.value = depths;
+    markTreeUpdate();
+}
+
+/** 条件树的先序（不含锚点本身），和 adc:patternPaths 的 entries 顺序一致 */
+function patternChildren(p: RulePattern): { relDepth?: number }[] {
+    const out: { relDepth?: number }[] = [];
+    const walk = (node: RulePattern) => {
+        for (const c of node.children ?? []) {
+            out.push({ relDepth: c.relDepth });
+            walk(c);
+        }
+    };
+    walk(p);
+    return out;
 }
 
 /** 切换「拦这一个 / 拦同类」时，让页面标出对应范围 */
@@ -535,17 +581,30 @@ async function setScope(scope: 'one' | 'broad'): Promise<void> {
     if (sel) await sendToTab({ type: 'adc:markMatches', selector: sel });
 }
 
-/** 勾选 / 取消勾选某个树节点 */
+/** 勾选 / 取消勾选某个树节点（条件节点） */
 function toggleCheck(path: string): void {
     const next = new Set(checkedPaths.value);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
+    if (next.has(path)) {
+        next.delete(path);
+        const t = { ...textByPath.value };
+        delete t[path];
+        textByPath.value = t;
+        const d = { ...relDepthByPath.value };
+        delete d[path];
+        relDepthByPath.value = d;
+    } else {
+        next.add(path);
+        if (textByPath.value[path] == null) {
+            textByPath.value = { ...textByPath.value, [path]: '' };
+        }
+    }
     checkedPaths.value = next;
-    partTexts.value = [];
 }
 
-/** 每段可选的文字约束（和 checkedNodes 同序） */
-const partTexts = ref<string[]>([]);
+/** 每个条件节点的文字约束（按树路径存，不再依赖勾选顺序） */
+const textByPath = ref<Record<string, string>>({});
+/** 严格模式下每个条件的层级（按树路径存；松模式只作切严格时的默认值） */
+const relDepthByPath = ref<Record<string, number>>({});
 
 /** 勾选出来的节点（按树的先后顺序，外层在前） */
 const checkedNodes = computed(() =>
@@ -559,57 +618,275 @@ function shortSelector(n: { tag: string; id: string; classes: string[] }): strin
     return cls ? `${n.tag}.${CSS.escape(cls)}` : n.tag;
 }
 
-/** 校验：深度必须一层比一层深，否则组不成链 */
+// ───────────────────────── 统一规则：锚点 + 条件树 ─────────────────────────
+
+/** 锚点 = 页面上点中的那一行（蓝色 current） */
+const anchorNode = computed<TreeRow | null>(() => tree.value.find((n) => n.current) ?? null);
+const anchorPath = computed(() => anchorNode.value?.path ?? '');
+
+/** 这个路径是不是在锚点内部 */
+function insideAnchor(path: string): boolean {
+    const a = anchorPath.value;
+    if (!a) return path !== '';
+    return path.startsWith(a + '/');
+}
+
+/** 真正的条件：勾选的、位于锚点内部、且不是锚点自己 */
+const conditionNodes = computed(() =>
+    checkedNodes.value.filter((n) => n.path !== anchorPath.value && insideAnchor(n.path)),
+);
+
+/** 勾到锚点外面的节点（用来提示，不参与规则） */
+const outsideChecks = computed(() =>
+    checkedNodes.value.filter((n) => n.path !== anchorPath.value && !insideAnchor(n.path)),
+);
+
+/** 严格层级开关：整条规则一个开关 */
+const strictMode = ref(false);
+/** 锚点自己的文字约束（偷懒模式：副标签里任意层出现这段字就拦） */
+const anchorText = ref('');
+/** 「+ 加条件」里选的、没有对应树节点的条件（按选择器） */
+const manualConditions = ref<{ selector: string; text?: string; relDepth: number }[]>([]);
+
+/** 某个条件节点的父节点（锚点或另一个条件节点） */
+function parentOf(path: string): TreeRow | null {
+    const a = anchorNode.value;
+    if (!a) return null;
+    let best: TreeRow = a;
+    for (const n of conditionNodes.value) {
+        if (n.path === path) continue;
+        if (path.startsWith(n.path + '/') && n.depth > best.depth) best = n;
+    }
+    return best;
+}
+
+interface CondRow {
+    path: string;
+    node: TreeRow;
+    selector: string;
+    text: string;
+    relDepth: number;
+    defaultDepth: number;
+    manual: boolean;
+}
+
+/** 树里勾出来的条件（按先序） */
+const conditionRows = computed<CondRow[]>(() =>
+    conditionNodes.value.map((n) => {
+        const parent = parentOf(n.path);
+        const defaultDepth = Math.max(1, n.depth - (parent?.depth ?? 0));
+        return {
+            path: n.path,
+            node: n,
+            selector: shortSelector(n),
+            text: textByPath.value[n.path] ?? '',
+            relDepth: relDepthByPath.value[n.path] ?? defaultDepth,
+            defaultDepth,
+            manual: false,
+        };
+    }),
+);
+
+/** 手动加的条件（+ 加条件 里选的元素） */
+const manualRows = computed<CondRow[]>(() =>
+    manualConditions.value.map((m, i) => ({
+        path: `manual:${i}`,
+        node: { path: `manual:${i}`, depth: 0, tag: '', id: '', classes: [], hasChildren: false, expanded: false, current: false, text: '', html: '' },
+        selector: m.selector,
+        text: m.text ?? '',
+        relDepth: m.relDepth,
+        defaultDepth: 1,
+        manual: true,
+    })),
+);
+
+/** 有没有可保存的条件内容 */
+const hasComposition = computed(() =>
+    !!anchorText.value.trim()
+    || conditionRows.value.length > 0
+    || manualRows.value.length > 0,
+);
+
+/** 规则编辑区顶部的一句人话摘要 */
+const compositionSummary = computed(() => {
+    const parts: string[] = [];
+    if (anchorText.value.trim()) parts.push(`含「${anchorText.value.trim()}」`);
+    const n = conditionRows.value.length + manualRows.value.length;
+    if (n > 0) parts.push(`${n} 个条件`);
+    return parts.join(' · ');
+});
+
+/** 校验：锚点必须有；条件必须在锚点内部；严格模式下层级必须合法 */
 const composeError = computed(() => {
-    const ns = checkedNodes.value;
-    if (ns.length < 2) return '';
-    for (let i = 1; i < ns.length; i++) {
-        if (ns[i].depth <= ns[i - 1].depth) return '勾选的层级必须一层比一层深（外层在前）';
+    if (!anchorNode.value) return '先在页面上选中要拦的元素';
+    if (outsideChecks.value.length > 0) return '勾选的标签必须在锚点内部；外面那几行请取消勾选';
+    if (strictMode.value) {
+        for (const r of conditionRows.value) {
+            if (!Number.isInteger(r.relDepth) || r.relDepth < 1) return '严格模式下每个条件都要填层级（≥1）';
+        }
+        for (const r of manualRows.value) {
+            if (!Number.isInteger(r.relDepth) || r.relDepth < 1) return '严格模式下每个条件都要填层级（≥1）';
+        }
     }
     return '';
 });
 
-/** 把用户在这段内容里划选的文字，填成这一段的文字约束 */
-function useSelection(i: number): void {
-    const sel = window.getSelection()?.toString().trim() ?? '';
-    if (!sel) {
-        showToast('先在下面那段内容里划选几个字');
+/** 当前草稿会命中几个元素（保存前就能看到影响范围） */
+const draftCount = ref(-1);
+let draftTimer: number | null = null;
+
+/** 上一次是否有条件草稿（用来判断"条件被清空"这个瞬间，恢复同类高亮） */
+let hadComposition = false;
+
+async function refreshDraftCount(): Promise<void> {
+    if (!canWork.value) {
+        draftCount.value = -1;
         return;
     }
-    const next = [...partTexts.value];
-    next[i] = sel.slice(0, 40);
-    partTexts.value = next;
-}
-
-/** 把勾选的标签组合成一条规则 */
-async function composeRule(): Promise<void> {
-    const ns = checkedNodes.value;
-    if (ns.length < 2 || composeError.value) return;
-
-    const parts = ns.map((n, i) => {
-        const t = (partTexts.value[i] ?? '').trim();
-        return {
-            selector: shortSelector(n),
-            relDepth: i === 0 ? 0 : n.depth - ns[i - 1].depth,
-            ...(t ? { text: t } : {}),
-        };
+    if (!hasComposition.value) {
+        draftCount.value = -1;
+        // 只在"刚把条件删光"时恢复同类高亮；平时不要插手内容脚本自己的选中高亮
+        if (hadComposition && picking.value) {
+            const sel = broadSelector.value || finalSelector.value;
+            if (sel) void sendToTab({ type: 'adc:markMatches', selector: sel });
+        }
+        hadComposition = false;
+        return;
+    }
+    hadComposition = true;
+    const p = buildPattern();
+    if (!p) {
+        draftCount.value = -1;
+        return;
+    }
+    const res = await sendToTab<{ ok: boolean; counts: number[] }>({
+        type: 'adc:countRules',
+        rules: [{ selector: p.selector, pattern: p, strict: strictMode.value }],
     });
-
-    const rule: BlockRule = {
-        id: editingId.value ?? newRuleId(),
-        domain: domain.value,
-        selector: parts[0].selector,
-        action: pickAction.value,
-        enabled: true,
-        label: parts.map((p) => (p.text ? `${p.selector}[${p.text}]` : p.selector)).join(' ▸ '),
-        createdAt: Date.now(),
-        parts,
-    };
-    await upsertRule(rule);
-    checkedPaths.value = new Set();
-    await sendToTab({ type: 'adc:reapply' });
-    await refreshRules();
+    draftCount.value = res?.counts?.[0] ?? -1;
+    // 让页面只圈出真正会命中的那几个：改一个字就从"同类 6 个"缩到"广告 2 个"
+    void sendToTab({
+        type: 'adc:markPattern',
+        selector: p.selector,
+        pattern: p,
+        strict: strictMode.value,
+    });
 }
+
+watch(
+    [hasComposition, strictMode, anchorText, checkedPaths, textByPath, relDepthByPath, manualConditions, anchorPath, selector],
+    () => {
+        if (draftTimer != null) window.clearTimeout(draftTimer);
+        draftTimer = window.setTimeout(() => { void refreshDraftCount(); }, 250);
+    },
+);
+
+/** 把当前锚点 + 条件拼成统一的条件树 */
+function buildPattern(): RulePattern | null {
+    const a = anchorNode.value;
+    if (!a) return null;
+    const rootSelector = editingId.value && editRootSelector.value && !scopeTouched.value
+        ? editRootSelector.value
+        : (finalSelector.value || shortSelector(a));
+    const root: RulePattern = {
+        selector: rootSelector,
+        ...(anchorText.value.trim() ? { text: anchorText.value.trim() } : {}),
+    };
+    const map = new Map<string, RulePattern>([[a.path, root]]);
+
+    for (const row of conditionRows.value) {
+        const parent = parentOf(row.path);
+        const parentPattern = parent ? map.get(parent.path) : undefined;
+        if (!parentPattern) continue;
+        const child: RulePattern = {
+            selector: row.selector,
+            relDepth: Math.max(1, strictMode.value ? row.relDepth : row.defaultDepth),
+            ...(row.text.trim() ? { text: row.text.trim() } : {}),
+        };
+        (parentPattern.children ??= []).push(child);
+        map.set(row.path, child);
+    }
+
+    for (const m of manualConditions.value) {
+        (root.children ??= []).push({
+            selector: m.selector,
+            relDepth: Math.max(1, m.relDepth),
+            ...(m.text ? { text: m.text } : {}),
+        });
+    }
+
+    return root;
+}
+
+/** 编辑已有规则时，原始锚点选择器（避免保存时被重新生成的位置选择器改写） */
+const editRootSelector = ref('');
+
+function clearComposition(): void {
+    checkedPaths.value = new Set();
+    textByPath.value = {};
+    relDepthByPath.value = {};
+    anchorText.value = '';
+    manualConditions.value = [];
+    strictMode.value = false;
+}
+
+/** 把用户在这一段内容里划选的文字，填成这一段的文字约束 */
+function useSelection(path: string): void {
+    const sel = window.getSelection()?.toString().trim() ?? '';
+    if (!sel) {
+        showToast('先在下面那段内容里划几个字');
+        return;
+    }
+    textByPath.value = { ...textByPath.value, [path]: sel.slice(0, 40) };
+}
+
+function useAnchorSelection(): void {
+    const sel = window.getSelection()?.toString().trim() ?? '';
+    if (!sel) {
+        showToast('先在页面上选几个字（或者直接在输入框里打）');
+        return;
+    }
+    anchorText.value = sel.slice(0, 40);
+}
+
+/** 严格模式下改某个条件的层级 */
+function setDepth(path: string, ev: Event): void {
+    const n = Math.max(1, Math.round(Number((ev.target as HTMLInputElement).value) || 1));
+    relDepthByPath.value = { ...relDepthByPath.value, [path]: n };
+}
+
+function setManualText(i: number, value: string): void {
+    const next = manualConditions.value.slice();
+    next[i] = { ...next[i], text: value };
+    manualConditions.value = next;
+}
+
+function setManualDepth(i: number, value: number): void {
+    const next = manualConditions.value.slice();
+    next[i] = { ...next[i], relDepth: Math.max(1, Math.round(Number(value) || 1)) };
+    manualConditions.value = next;
+}
+
+function onManualText(i: number, ev: Event): void {
+    setManualText(i, (ev.target as HTMLInputElement).value);
+}
+
+function onManualDepth(i: number, ev: Event): void {
+    setManualDepth(i, Number((ev.target as HTMLInputElement).value));
+}
+
+function removeManual(i: number): void {
+    manualConditions.value = manualConditions.value.filter((_, k) => k !== i);
+}
+
+/** 主按钮文案：把当前草稿的条件数直接写在按钮上，别让用户猜 */
+const draftPartCount = computed(() => conditionRows.value.length + manualRows.value.length);
+const saveLabel = computed(() => {
+    const base = editingId.value ? '保存修改' : '拦截这个';
+    if (!hasComposition.value) return base;
+    const n = draftPartCount.value;
+    return n > 0 ? `${base}（${n} 个条件）` : `${base}（含文字）`;
+});
 
 /** 展开 / 收起树节点 */
 function togglePath(path: string): void {
@@ -666,8 +943,17 @@ async function togglePreview(): Promise<void> {
         showToast('先选中要拦的东西');
         return;
     }
+    if (hasComposition.value && composeError.value) {
+        showToast(composeError.value);
+        return;
+    }
+    const pattern = hasComposition.value ? buildPattern() : null;
     const res = await sendToTab<{ ok: boolean; count: number }>({
-        type: 'adc:previewApply', selector: finalSelector.value, action: pickAction.value,
+        type: 'adc:previewApply',
+        selector: pattern?.selector ?? finalSelector.value,
+        action: pickAction.value,
+        pattern: pattern ?? undefined,
+        strict: strictMode.value,
     });
     if (res?.ok) {
         previewing.value = true;
@@ -697,22 +983,30 @@ async function confirmPick(): Promise<void> {
         showToast('先在页面上点一下要拦的东西');
         return;
     }
-    const label = currentLabel.value || finalSelector.value;
+    if (hasComposition.value && composeError.value) {
+        showToast(composeError.value);
+        return;
+    }
     const old = editingId.value ? rules.value.find((r) => r.id === editingId.value) : null;
+    const pattern = hasComposition.value ? buildPattern() : null;
+    const selector = pattern?.selector ?? finalSelector.value;
+    const label = pattern ? patternLabel(pattern, strictMode.value) : (currentLabel.value || selector);
 
     const rule: BlockRule = {
         id: editingId.value ?? newRuleId(),
         domain: domain.value,
-        selector: finalSelector.value,
+        selector,
         action: pickAction.value,
         enabled: true,
         label,
         createdAt: old?.createdAt ?? Date.now(),
-        ...(condition.value ? { condition: condition.value } : {}),
+        pattern: pattern ?? { selector },
+        strict: pattern ? strictMode.value : false,
     };
 
     previewing.value = false;
     await upsertRule(rule);
+    clearComposition();
     stopPolling();
     await sendToTab({ type: 'adc:stopPicker' });
     await sendToTab({ type: 'adc:reapply' });
@@ -1037,16 +1331,14 @@ onUnmounted(() => {
 
                     <div class="rule-main">
                         <div class="rule-label">
-                            {{ r.label || r.selector }}
-                            <span v-if="r.parts && r.parts.length > 1" class="cond-tag">
-                                {{ r.parts.length }} 层组合
-                            </span>
-                            <span v-if="r.condition" class="cond-tag">
-                                {{ r.condition.type === 'text' ? `含「${r.condition.value}」` : `含 ${r.condition.value}` }}
+                            {{ ruleToLabel(r) }}
+                            <span v-if="r.strict" class="cond-tag">严格层级</span>
+                            <span v-else-if="r.pattern && r.pattern.children && r.pattern.children.length" class="cond-tag">
+                                {{ r.pattern.children.length }} 个条件
                             </span>
                             <span v-if="!r.enabled" class="off-tag">已停用</span>
                         </div>
-                        <div v-if="r.selector !== r.label" class="rule-sel">{{ r.selector }}</div>
+                        <div v-if="r.selector !== (r.label || '')" class="rule-sel">{{ r.selector }}</div>
                     </div>
 
                     <span
@@ -1164,14 +1456,12 @@ onUnmounted(() => {
                     <span class="k">选择器</span>
                     <span class="v">{{ finalSelector || '—' }}</span>
                 </div>
-                <!-- 条件：命中这个选择器、并且内部含某东西才拦 -->
+                <!-- 条件摘要：锚点文字 / 勾选的条件 / 手动加的条件 -->
                 <div class="info-row">
                     <span class="k">条件</span>
-                    <span v-if="condition" class="v cond-on">
-                        {{ condition.type === 'text' ? `含「${condition.value}」` : `含 ${condition.value}` }}
-                    </span>
+                    <span v-if="hasComposition" class="v cond-on">{{ compositionSummary }}</span>
                     <span v-else class="v muted">{{ condPicking ? '去页面上点一下…' : '不限' }}</span>
-                    <button v-if="condition" class="mini-btn" @click="clearCondition">清除</button>
+                    <button v-if="hasComposition" class="mini-btn" @click="clearCondition">清除</button>
                     <button v-else class="mini-btn" :disabled="condPicking" @click="startCondPick">
                         {{ condPicking ? '等待点选' : '+ 加条件' }}
                     </button>
@@ -1229,7 +1519,7 @@ onUnmounted(() => {
                     </span>
                 </div>
                 <!-- 让用户一眼看到"这一刀下去会波及多少" -->
-                <div v-if="broadCount > 1" class="broad-hint">
+                <div v-if="broadCount > 1 && !hasComposition" class="broad-hint">
                     按 <code>{{ broadSelector }}</code> 拦 → 页面上有 <b>{{ broadCount }}</b> 个同款（已用蓝色虚线标出）
                 </div>
 
@@ -1239,44 +1529,105 @@ onUnmounted(() => {
                 </div>
                 <div class="info-row">
                     <span class="k">命中</span>
-                    <span class="v" :class="{ warn: finalCount > 1 }">
-                        {{ finalCount < 0 ? '选择器无效' : finalCount + ' 个元素' }}
+                    <span class="v" :class="{ warn: (hasComposition ? draftCount : finalCount) > 1 }">
+                        {{ hasComposition
+                            ? (draftCount < 0 ? '计算中…' : draftCount + ' 个元素')
+                            : (finalCount < 0 ? '选择器无效' : finalCount + ' 个元素') }}
                     </span>
                 </div>
             </div>
 
             <footer class="foot three">
                 <!-- 组合标签规则：勾几层 → 一条规则 -->
-                <div v-if="picking && checkedNodes.length > 0" class="compose">
-                    <div class="compose-parts">
-                        <div v-for="(n, i) in checkedNodes" :key="n.path" class="compose-part">
+                <!-- 统一规则编辑：锚点 + 条件树 + 严格层级开关 -->
+                <div v-if="picking" class="compose">
+                    <div class="compose-anchor">
+                        <div class="compose-head">
+                            <span class="cond-badge anchor">锚</span>
+                            <span class="compose-sel">{{ finalSelector || (anchorNode ? shortSelector(anchorNode) : '—') }}</span>
+                            <button class="compose-pick" @click="useAnchorSelection">选中的字</button>
+                        </div>
+                        <input
+                            v-model="anchorText"
+                            class="compose-text"
+                            placeholder="任意层包含这段文字就拦（可不填）"
+                        />
+                    </div>
+
+                    <label class="compose-strict">
+                        <input type="checkbox" v-model="strictMode" />
+                        <span>严格限制层级关系</span>
+                        <span class="strict-hint">{{ strictMode ? '条件必须正好在第 N 层' : '条件在锚点子树里任意层找' }}</span>
+                    </label>
+
+                    <div v-if="conditionRows.length || manualRows.length" class="compose-parts">
+                        <div
+                            v-for="row in conditionRows"
+                            :key="row.path"
+                            class="compose-part"
+                            :style="{ paddingLeft: Math.max(0, row.node.depth - (anchorNode?.depth ?? 0) - 1) * 10 + 'px' }"
+                        >
                             <div class="compose-head">
-                                <span v-if="i > 0" class="compose-gap">▸{{ n.depth - checkedNodes[i - 1].depth }}</span>
-                                <span class="compose-sel">{{ shortSelector(n) }}</span>
+                                <span class="cond-badge">条件</span>
+                                <span class="compose-sel">{{ row.selector }}</span>
+                                <button class="compose-pick" @click="useSelection(row.path)">选中的字</button>
+                            </div>
+                            <div class="compose-sub">
                                 <input
-                                    v-model="partTexts[i]"
+                                    v-model="textByPath[row.path]"
                                     class="compose-text"
                                     placeholder="文字含…（可不填）"
                                 />
-                                <button
-                                    class="compose-pick"
-                                    title="先在下面那段内容里选中几个字，再点这里"
-                                    @click="useSelection(i)"
-                                >选中的字</button>
+                                <template v-if="strictMode">
+                                    <span class="compose-gap">第</span>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        class="compose-depth"
+                                        :value="relDepthByPath[row.path] ?? row.defaultDepth"
+                                        @input="setDepth(row.path, $event)"
+                                    />
+                                    <span class="compose-gap">层</span>
+                                </template>
                             </div>
-                            <!-- 这段的完整内容：可以在这里划选文字，再点上面的「选中的字」 -->
-                            <div v-if="n.text" class="compose-content">{{ n.text }}</div>
                         </div>
+
+                        <div v-for="(row, i) in manualRows" :key="row.path" class="compose-part">
+                            <div class="compose-head">
+                                <span class="cond-badge">条件</span>
+                                <span class="compose-sel">{{ row.selector }}</span>
+                                <button class="compose-pick" @click="removeManual(i)">删除</button>
+                            </div>
+                            <div class="compose-sub">
+                                <input
+                                    class="compose-text"
+                                    :value="row.text"
+                                    placeholder="文字含…（可不填）"
+                                    @input="onManualText(i, $event)"
+                                />
+                                <template v-if="strictMode">
+                                    <span class="compose-gap">第</span>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        class="compose-depth"
+                                        :value="row.relDepth"
+                                        @input="onManualDepth(i, $event)"
+                                    />
+                                    <span class="compose-gap">层</span>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-if="!hasComposition" class="compose-hint">
+                        在树里勾选锚点内部的标签 = 加一条条件；也可以直接在锚点这一行填文字。
                     </div>
 
                     <div v-if="composeError" class="compose-err">{{ composeError }}</div>
                     <div class="compose-actions">
-                        <button class="ghost sm" @click="checkedPaths = new Set()">清空</button>
-                        <button
-                            class="primary sm"
-                            :disabled="checkedNodes.length < 2 || !!composeError"
-                            @click="composeRule"
-                        >组合成规则（{{ checkedNodes.length }} 层）</button>
+                        <button class="ghost sm" @click="clearComposition">清空条件</button>
+                        <span class="compose-save-hint">底部按钮会按这里的条件生成规则</span>
                     </div>
                 </div>
 
@@ -1291,7 +1642,7 @@ onUnmounted(() => {
                         {{ previewing ? '退出预览' : '👁 预览效果' }}
                     </button>
                     <button class="primary" @click="confirmPick">
-                        {{ editingId ? '保存修改' : '拦截这个' }}
+                        {{ saveLabel }}
                     </button>
                 </div>
             </footer>
@@ -1784,9 +2135,55 @@ onUnmounted(() => {
     background: #f7f8fa;
     border-radius: 8px;
 }
+.compose-anchor {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 6px;
+}
+.cond-badge {
+    flex: none;
+    font-size: 10px;
+    line-height: 16px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: #e8f0ff;
+    color: #1677ff;
+    font-weight: 600;
+}
+.cond-badge.anchor { background: #1677ff; color: #fff; }
+.compose-strict {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px 6px;
+    margin-bottom: 6px;
+    font-size: 11.5px;
+    color: #4e5969;
+    cursor: pointer;
+}
+.compose-strict input { accent-color: #1677ff; }
+.strict-hint { color: #86909c; font-size: 10.5px; }
+.compose-depth {
+    flex: none;
+    width: 40px;
+    height: 24px;
+    padding: 0 4px;
+    border: 1px solid #e5e6eb;
+    border-radius: 5px;
+    font-size: 11px;
+    color: #1f2329;
+}
+.compose-hint {
+    margin: 4px 0;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #86909c;
+}
 .compose-parts { display: flex; flex-direction: column; gap: 4px; }
-.compose-part { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
-.compose-head { display: flex; align-items: center; gap: 4px; }
+.compose-part { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+.compose-head { display: flex; align-items: center; gap: 4px; width: 100%; }
+.compose-sub { display: flex; align-items: center; gap: 4px; width: 100%; }
 .compose-gap { color: #00aeec; font-size: 10.5px; flex: none; }
 .compose-sel {
     flex: 1;
@@ -1799,8 +2196,9 @@ onUnmounted(() => {
     white-space: nowrap;
 }
 .compose-text {
-    flex: none;
-    width: 110px;
+    flex: 1;
+    width: 100%;
+    min-width: 0;
     height: 24px;
     padding: 0 6px;
     border: 1px solid #e5e6eb;
@@ -1811,6 +2209,7 @@ onUnmounted(() => {
 .compose-text:focus { outline: none; border-color: #00aeec; }
 .compose-pick {
     flex: none;
+    margin-left: auto;
     border: 1px solid #d9d9d9;
     background: #fff;
     color: #4e5969;
@@ -1835,8 +2234,15 @@ onUnmounted(() => {
     cursor: text;
 }
 .compose-err { margin-top: 4px; color: #f53f3f; font-size: 11px; }
-.compose-actions { display: flex; gap: 8px; margin-top: 8px; }
-.compose-actions .sm { flex: 1; height: 30px; font-size: 12px; border-radius: 15px; }
+.compose-actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.compose-actions .sm { flex: none; height: 28px; padding: 0 12px; font-size: 11.5px; border-radius: 14px; }
+.compose-save-hint {
+    flex: 1;
+    text-align: right;
+    color: #86909c;
+    font-size: 10.5px;
+    line-height: 1.4;
+}
 
 .arrow {
     flex: none;

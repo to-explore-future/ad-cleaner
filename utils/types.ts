@@ -24,20 +24,46 @@ export interface RulePart {
     text?: string;
 }
 
+/**
+ * 统一规则模型：锚点 + 条件树。
+ *
+ * 一条规则拦「锚点」，当它的子树满足 children 里的条件。
+ * children 可以递归，所以"某个子标签里还要有某个标签/某段文字"能一直套下去。
+ * strict 开关在整条规则上：关 = children 在任意层找；开 = 按 relDepth 精确匹配。
+ */
+export interface RulePattern {
+    /** 这一层要匹配的 CSS 选择器；'*' 表示任意元素 */
+    selector: string;
+    /** 这一层的文本必须包含这段内容（包含所有后代的文字） */
+    text?: string;
+    /** 相对父层：正好往下第几层。strict=false 时忽略 */
+    relDepth?: number;
+    /** 子条件（默认全部满足） */
+    children?: RulePattern[];
+}
+
 /** 一条拦截规则。 */
 export interface BlockRule {
     id: string;
     /** 归属域名，例如 www.example.com（按 hostname 精确匹配） */
     domain: string;
-    /** CSS 选择器 */
+    /** CSS 选择器（锚点） */
     selector: string;
     action: RuleAction;
     enabled: boolean;
     /** 给人看的短描述，例如 `div.ad-box` */
     label: string;
-    /** 可选条件：命中选择器之后，还要满足这个条件才拦 */
+    /** 统一规则模型（新规则一定有；旧规则加载时自动迁移） */
+    pattern?: RulePattern;
+    /** 严格层级：true = children 按 relDepth 精确匹配；false/缺省 = 任意层 */
+    strict?: boolean;
+    /**
+     * @deprecated 旧条件模型，加载时迁移到 pattern
+     */
     condition?: RuleCondition;
-    /** 组合标签规则：按层级差逐段匹配（有它就优先走这条） */
+    /**
+     * @deprecated 旧组合模型，加载时迁移到 pattern
+     */
     parts?: RulePart[];
     createdAt: number;
 }

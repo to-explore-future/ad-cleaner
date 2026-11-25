@@ -48,6 +48,15 @@ let picking = false;
  *     （否则用户想去点树里的祖先时，鼠标一动树就变了，根本点不中）
  */
 let locked = false;
+/**
+ * 这次选中是谁触发的：
+ *   page  = 用户在页面上点了一下（只有这种才让右侧树居中）
+ *   panel = 用户在右侧树里点行/编辑
+ *   hover = 页面上的鼠标悬停（不居中，否则树会跟着鼠标一直滚）
+ */
+let selectionOrigin: 'page' | 'panel' | 'hover' = 'hover';
+/** 用户在页面上"点选"的次数。面板靠它判断是不是一次新的左→右选择。 */
+let pageSelectionSeq = 0;
 /** 鼠标当前悬停的元素（不管锁没锁定都更新）—— 面板轮询时靠它 */
 let lastHovered: Element | null = null;
 let chain: Element[] = [];
@@ -631,7 +640,10 @@ function togglePath(key: string): void {
 /** 选中树里的某个节点 */
 function selectPath(key: string): void {
     const el = elementAtPath(pathOfKey(key));
-    if (el) setSelected(el);
+    if (el) {
+        selectionOrigin = 'panel';
+        setSelected(el);
+    }
 }
 
 /** 悬停树里的某个节点 → 页面上高亮它 */
@@ -668,6 +680,10 @@ function currentState() {
     return {
         picking,
         locked,
+        /** 这次选中来自哪里（page / panel / hover），面板据此决定要不要居中 */
+        origin: selectionOrigin,
+        /** 页面上第几次点选（面板去重用） */
+        pageSeq: pageSelectionSeq,
         chain: effectiveChain.map((x) => describeElement(x)),
         currentIndex: effectiveIndex,
         selector: sel,
@@ -730,6 +746,7 @@ function setSelected(el: Element, opts: { repaint?: boolean } = {}): void {
 function selectAncestor(index: number): void {
     if (index < 0 || index >= chain.length) return;
     if (isPreviewing()) revertPreview();
+    selectionOrigin = 'panel';
     invalidateTree();
     currentIndex = index;
     const el = currentEl();
@@ -742,6 +759,9 @@ function startPicker(): void {
     if (picking) return;
     picking = true;
     locked = false;
+    // 每次进入选择模式重新计数：面板以 0 为基线，页面点一下就是 1
+    pageSelectionSeq = 0;
+    selectionOrigin = 'hover';
     chain = [];
     currentIndex = -1;
     invalidateTree();
@@ -786,6 +806,8 @@ function onMove(e: MouseEvent): void {
     const el = hitTest(e.clientX, e.clientY);
     if (!el) return;
     lastHovered = el;
+    // 悬停不等于"选中"：只更新树，不让面板把行滚到中间
+    if (!locked) selectionOrigin = 'hover';
 
     /**
      * ⚠️⚠️ 锁定之后**绝对不能再画鼠标下的元素**。
@@ -879,11 +901,17 @@ function onClick(e: MouseEvent): void {
      */
     const cur = currentEl();
     if (locked && cur && (el === cur || cur.contains(el))) {
+        selectionOrigin = 'page';
         unlockSelection();
         return;
     }
 
+    // 页面点选：这是唯一会让右侧树"滚到中间"的来源
+    selectionOrigin = 'page';
+    pageSelectionSeq++;
     setSelected(el);
+    // 单独发一条"页面选中"通知：面板收到才居中，轮询/悬停都不会触发
+    chrome.runtime.sendMessage({ type: 'adc:pageSelected' }).catch(() => { /* 面板没开就算了 */ });
 }
 
 function onKey(e: KeyboardEvent): void {
@@ -1273,6 +1301,7 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                     const el = document.querySelector(String(msg.selector ?? ''));
                     if (el) {
                         if (!picking) startPicker();
+                        selectionOrigin = 'panel';
                         setSelected(el);
                         sendResponse({ ok: true });
                     } else {

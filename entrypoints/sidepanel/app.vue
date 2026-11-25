@@ -472,6 +472,8 @@ async function startPick(): Promise<void> {
     matchCount.value = 0;
     checkedPaths.value = new Set();
     partTexts.value = [];
+    // 新一次选择：重新记基线，别把上一次的页面点选当成新的
+    centerToken++;
 }
 
 async function startEdit(rule: BlockRule): Promise<void> {
@@ -494,6 +496,8 @@ async function startEdit(rule: BlockRule): Promise<void> {
     // 重新编辑时，先清掉上一次的勾选，避免旧规则的三段被带进来
     checkedPaths.value = new Set();
     partTexts.value = [];
+    // 编辑是右侧操作：不居中，重新记基线
+    centerToken++;
 
     const res = await sendToTabOrInject<{ ok: boolean }>({
         type: 'adc:selectBySelector', selector: rule.selector,
@@ -744,6 +748,7 @@ async function pollPickerState(): Promise<void> {
     try {
         const st = await sendToTab<{
             ok: boolean; picking: boolean; locked: boolean;
+            origin?: string; pageSeq?: number;
             chain: ElementInfo[]; currentIndex: number; selector: string; matchCount: number;
             broadSelector: string; broadCount: number;
             tree: typeof tree.value; currentPath: string;
@@ -784,6 +789,7 @@ async function pollPickerState(): Promise<void> {
             matchCount.value = st.matchCount;
             broadSelector.value = st.broadSelector ?? '';
             broadCount.value = st.broadCount ?? 0;
+            // 只有页面点选（origin=page 且 locked）才会在这里触发居中
             /**
              * ⚠️ 这里**不许**再无条件 `tree.value = st.tree`。
              *    上面闸门之外再刷一次，等于闸门没写 —— 锁定后页面自己插几个节点，
@@ -829,10 +835,6 @@ function stopPolling(): void {
     }
 }
 
-// 选中层变化时，把树里的当前行滚到视口中央，保证一眼能看到
-/** 树里"当前行"的路径（不依赖 currentPath，那个有时是空的） */
-const currentRowPath = computed(() => tree.value.find((n) => n.current)?.path ?? '');
-
 /** 把当前行滚到列表的**正中**（不是只让它露出来） */
 function centerCurrentRow(): void {
     const c = treeEl.value;
@@ -844,19 +846,35 @@ function centerCurrentRow(): void {
     // 目标：行中心 == 容器中心
     const delta = rr.top - cr.top - (c.clientHeight - rr.height) / 2;
     if (Math.abs(delta) < 4) return;
-    c.scrollTo({ top: c.scrollTop + delta, behavior: 'smooth' });
+    // 用即时滚动：smooth 在 CDP 的 deviceMetrics 模拟下经常不生效
+    c.scrollTop = c.scrollTop + delta;
 }
 
-// 切换换行开关后，悬浮检测会重新量（下一次悬浮就准）
-watch(currentRowPath, async () => {
-    await nextTick();
-    centerCurrentRow();
-});
+/**
+ * 只有「左侧页面点选」才有资格让右侧树居中。
+ *
+ * 内容脚本在页面点击选中后会单独发 `adc:pageSelected`；
+ * 面板里点行、展开/收起、勾选、编辑、轮询、悬停都不会发这条消息，
+ * 所以它们一个像素都不会滚。
+ */
+let centerToken = 0;
+
+function centerForPageSelection(): void {
+    const token = ++centerToken;
+    const run = () => {
+        if (token !== centerToken) return; // 后面又有新的点选，交给最新的那次
+        centerCurrentRow();
+    };
+    void nextTick(run);
+    // 树是异步消息驱动的，可能晚一拍到；补两次，确保滚到位
+    window.setTimeout(run, 150);
+    window.setTimeout(run, 400);
+}
 
 /**
  * ⚠️ 树变化**不自动滚动**。
  *    展开/收起节点也会让树变化，之前这里跟了居中逻辑，结果一点展开列表就跳。
- *    规则：只有"选中的元素换了"才居中；展开/收起保持用户当前滚动位置。
+ *    规则：只有"页面点选"才居中；展开/收起保持用户当前滚动位置。
  */
 const preserveScroll = ref<number | null>(null);
 /** 在这个时间点之前，每次树更新都把滚动位置摆回去（一次不够，消息可能分几次到） */
@@ -869,21 +887,11 @@ watch(tree, async () => {
     if (treeEl.value) treeEl.value.scrollTop = preserveScroll.value;
 });
 
-// 树重新渲染（展开/换目标）后，只保证当前行在视野内，避免来回跳
-watch(tree, async () => {
-    await nextTick();
-    const box = treeEl.value;
-    const row = box?.querySelector('.row.current') as HTMLElement | null;
-    if (!box || !row) return;
-    const rb = row.getBoundingClientRect();
-    const tb = box.getBoundingClientRect();
-    if (rb.top < tb.top || rb.bottom > tb.bottom) row.scrollIntoView({ block: 'nearest' });
-});
-
 function onRuntimeMessage(msg: unknown): void {
     const m = msg as {
         type?: string;
         selector?: string; matchCount?: number; broadSelector?: string; broadCount?: number;
+        locked?: boolean; origin?: string; pageSeq?: number;
         tree?: typeof tree.value; currentPath?: string;
     };
     if (m?.type === 'adc:pickerChanged') {
@@ -898,6 +906,9 @@ function onRuntimeMessage(msg: unknown): void {
         broadSelector.value = m.broadSelector ?? '';
         broadCount.value = m.broadCount ?? 0;
         // 树只在上面闸门内更新；这里再刷一次会让锁定后的树跟着页面变（⑭）。
+    } else if (m?.type === 'adc:pageSelected') {
+        // 只有页面点选会发这条 → 右侧树居中；面板自己的操作不发
+        centerForPageSelection();
     } else if (m?.type === 'adc:condPicked') {
         const r = msg as { total?: number; candidates?: typeof condCandidates.value };
         condTotal.value = r.total ?? 0;

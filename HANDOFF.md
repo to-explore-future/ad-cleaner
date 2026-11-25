@@ -21,7 +21,7 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压 → 选
 
 ```bash
 node scripts/server.cjs &     # 本地测试页 :8941
-node scripts/verify-real.cjs  # 生产路径端到端，102 项
+node scripts/verify-real.cjs  # 生产路径端到端，103 项
 node scripts/verify.cjs       # 完整套件，25 项
 ```
 
@@ -47,7 +47,7 @@ scripts/fixture/index.html            测试页
 - 组合标签规则：勾多层 + 层级差 + 每段可加文字约束
 - 规则列表：本页/本网站筛选、开关、编辑、删除、命中数、导入导出
 - 面板可弹出成独立窗口（⧉）
-- 127 项自动化测试（102 + 25）
+- 128 项自动化测试（103 + 25）
 
 ## 已知问题（**未修完**）
 
@@ -65,6 +65,10 @@ scripts/fixture/index.html            测试页
 > 0.2.8 已修：多行标签在行右上角悬浮「折叠该行」；单行不显示（Range 数真实折行数）；
 > 空路径 `''` 与"未悬浮"状态撞车导致按钮常驻第一行（改用 `null`）。
 > 对应测试 ⑲ / ⑳。
+>
+> 0.2.9 已修：右侧树只在**左侧页面点选**时居中；页面脚本单独发 `adc:pageSelected`，
+> 面板点行/展开/勾选/编辑/悬停都不滚动。居中改用即时 `scrollTop`（smooth 在
+> CDP deviceMetrics 下不生效）。对应测试 ⑮ / ⑱ / ㉑。
 
 ## 关键约定（改之前必读）
 

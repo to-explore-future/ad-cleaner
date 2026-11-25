@@ -1116,6 +1116,33 @@ async function importRulesFile(panel, filePath) {
     await panel.send('Emulation.clearDeviceMetricsOverride');
     await sleep(400);
 
+    // ═══════════ ㉑ 右侧点标签行不许滚动（只有左侧点选才居中） ═══════════
+    await panel.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 520, deviceScaleFactor: 1, mobile: false });
+    await sleep(500);
+    await ev(panel, `(() => { const c = document.querySelector('.tree'); if (c) c.scrollTop = 140; return true; })()`);
+    await sleep(300);
+    const before21 = await ev(panel, `document.querySelector('.tree')?.scrollTop ?? -1`);
+    const clicked21 = await ev(panel, `(() => {
+        const c = document.querySelector('.tree');
+        if (!c) return false;
+        const cb = c.getBoundingClientRect();
+        const row = [...c.querySelectorAll('.row')].find((r) => {
+            const b = r.getBoundingClientRect();
+            return b.top > cb.top + 40 && b.bottom < cb.bottom - 10 && r.querySelector('.name');
+        });
+        if (!row) return false;
+        row.querySelector('.name').click();
+        return true;
+    })()`);
+    await sleep(1400);
+    const after21 = await ev(panel, `document.querySelector('.tree')?.scrollTop ?? -1`);
+    console.log('   · 右侧点行 scrollTop:', before21, '→', after21);
+    check('㉑ 右侧点标签行不滚动列表',
+        clicked21 === true && Math.abs(Number(after21) - Number(before21)) <= 2,
+        `${before21} → ${after21}`);
+    await panel.send('Emulation.clearDeviceMetricsOverride');
+    await sleep(300);
+
     // ═══════════ ⑱ 只有"选中的元素变了"才居中 ═══════════
     await panel.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 520, deviceScaleFactor: 1, mobile: false });
     await sleep(600);

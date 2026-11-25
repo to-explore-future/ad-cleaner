@@ -1164,8 +1164,18 @@ async function importRulesFile(panel, filePath) {
     const hasGlobalBtn = await ev(panel, `!!document.querySelector('.wrap-btn')`);
     check('⑲ 顶部全局「源码换行」按钮还在', hasGlobalBtn === true);
 
-    const noRowBtn = await ev(panel, `document.querySelectorAll('.fold-btn').length`);
-    check('⑲ 行内不再有「单行」按钮', Number(noRowBtn) === 0, `${noRowBtn} 个`);
+    // 悬浮一个"单行"的节点 → 不该出现「折叠该行」
+    const singleTest = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => x.getBoundingClientRect().height <= 30);
+        if (!r) return 'no-single';
+        r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+        return r.dataset.path;
+    })()`);
+    await sleep(500);
+    const btnAfterSingle = await ev(panel, `document.querySelectorAll('.tree .row .fold-btn').length`);
+    check('⑲ 悬浮单行的行：没有折叠按钮', Number(btnAfterSingle) === 0, `${btnAfterSingle} 个 (${singleTest})`);
 
     const rowsBefore19 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
     const expandedBefore19 = await ev(panel, `document.querySelectorAll('.tree .row .arrow.open').length`);
@@ -1180,6 +1190,61 @@ async function importRulesFile(panel, filePath) {
     const expandedAfter19 = await ev(panel, `document.querySelectorAll('.tree .row .arrow.open').length`);
     console.log('   · 行数:', rowsBefore19, '→', rowsAfter19, '| 展开数:', expandedBefore19, '→', expandedAfter19);
     check('⑲ 悬浮不改变树的展开状态', expandedAfter19 === expandedBefore19, `${expandedBefore19} → ${expandedAfter19}`);
+
+    // ═══════════ ⑳ 只有多行的行才有「折叠该行」，且在右上角不挤内容 ═══════════
+    // 直接用 ⑲ 里已经展开的树，不重启（避免重载后状态不确定）
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 900, y: 15, button: 'none' });
+    await sleep(900);
+
+    // 移到有长属性的卡片上（那里才有会折行的行），并确保是换行模式
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(900);
+    await ev(panel, `(() => {
+        const b = document.querySelector('.wrap-btn');
+        if (b && /不换行/.test(b.textContent)) b.click();
+        return true;
+    })()`);
+    await sleep(800);
+
+    const multiPath = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => x.getBoundingClientRect().height > 30);
+        if (!r) return '';
+        r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+        return r.dataset.path;
+    })()`);
+    await sleep(600);
+
+    const foldInfo = JSON.parse(await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const withBtn = rows.filter((r) => r.querySelector('.fold-btn'));
+        const b = withBtn[0]?.querySelector('.fold-btn');
+        const cs = b ? getComputedStyle(b) : null;
+        const r0 = withBtn[0];
+        const nameW = r0 ? Math.round(r0.querySelector('.name').getBoundingClientRect().width) : 0;
+        const rowW = r0 ? Math.round(r0.getBoundingClientRect().width) : 0;
+        return JSON.stringify({
+            withBtn: withBtn.length,
+            position: cs ? cs.position : '',
+            nameW, rowW,
+        });
+    })()`));
+    console.log('   · 悬浮多行行:', multiPath, JSON.stringify(foldInfo));
+    check('⑳ 悬浮多行的行才出现折叠按钮', foldInfo.withBtn >= 1 && !!multiPath, JSON.stringify(foldInfo));
+    check('⑳ 按钮是绝对定位（不参与布局）', foldInfo.position === 'absolute', foldInfo.position);
+    check('⑳ 按钮不挤占内容宽度', foldInfo.nameW >= foldInfo.rowW - 100, `name ${foldInfo.nameW} / row ${foldInfo.rowW}`);
+
+    // 悬浮一行 → 按钮出现，行高/行数不变
+    const before20 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    await ev(panel, `(() => {
+        const r = document.querySelector('.tree .row');
+        r && r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        return true;
+    })()`);
+    await sleep(400);
+    const after20 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
+    check('⑳ 悬浮不改变行数', after20 === before20, `${before20} → ${after20}`);
 
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);

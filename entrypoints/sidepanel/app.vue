@@ -44,6 +44,31 @@ const tree = ref<{ path: string; depth: number; tag: string; id: string; classes
 const currentPath = ref('');
 /** 树里的源码是否换行显示（不换行时一行截断） */
 const wrapSource = ref(true);
+/**
+ * 鼠标正停在哪个"多行"的节点上。
+ * 不预测量整棵树（尺寸一变就不准），而是在悬浮那一刻**当场量这一行**：
+ *   行高 > 26px 才算多行 → 才显示「折叠该行」。
+ * 单行的行永远不显示这个按钮。
+ */
+const hoverMultiPath = ref('');
+/** 被折叠成单行的节点 */
+const foldedRows = ref<Set<string>>(new Set());
+
+/** 悬浮到某一行：当场量它是不是多行 */
+async function onRowEnter(path: string): Promise<void> {
+    await nextTick();
+    const row = treeEl.value?.querySelector(`.row[data-path="${path}"]`) as HTMLElement | null;
+    // 用整行高度判断：单行约 24px，折行后会明显变高
+    hoverMultiPath.value = row && row.getBoundingClientRect().height > 30 ? path : '';
+}
+
+function toggleFold(path: string): void {
+    const next = new Set(foldedRows.value);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    foldedRows.value = next;
+}
+
 /** 树是否需要刷新（用户自己点展开/选节点时才置 true，用一次就清） */
 const allowTreeUpdate = ref(false);
 function markTreeUpdate(): void {
@@ -795,6 +820,7 @@ function centerCurrentRow(): void {
     c.scrollTo({ top: c.scrollTop + delta, behavior: 'smooth' });
 }
 
+// 切换换行开关后，悬浮检测会重新量（下一次悬浮就准）
 watch(currentRowPath, async () => {
     await nextTick();
     centerCurrentRow();
@@ -810,6 +836,7 @@ const preserveScroll = ref<number | null>(null);
 let preserveUntil = 0;
 
 watch(tree, async () => {
+    hoverMultiPath.value = '';
     if (preserveScroll.value == null || Date.now() > preserveUntil) return;
     await nextTick();
     if (treeEl.value) treeEl.value.scrollTop = preserveScroll.value;
@@ -1045,7 +1072,9 @@ onUnmounted(() => {
                     v-for="n in tree"
                     :key="n.path"
                     class="row"
-                    :class="{ current: n.current, checked: checkedPaths.has(n.path) }"
+                    :class="{ current: n.current, checked: checkedPaths.has(n.path), folded: foldedRows.has(n.path) }"
+                    :data-path="n.path"
+                    @mouseenter="onRowEnter(n.path)"
                     :style="{ paddingLeft: 2 + n.depth * 7 + 'px' }"
                 >
                     <!-- 勾选：用来组合成规则 -->
@@ -1073,6 +1102,11 @@ onUnmounted(() => {
                         <span class="html">{{ n.html }}</span>
                         <span v-if="n.text && !n.hasChildren" class="txt">"{{ n.text.slice(0, 40) }}"</span>
                     </span>
+                    <!-- 只有多行的行才在右上角显示「折叠该行」 -->
+                    <button
+                        v-if="hoverMultiPath === n.path"
+                        @click.stop="toggleFold(n.path)"
+                    >{{ foldedRows.has(n.path) ? '展开' : '折叠该行' }}</button>
                 </div>
                 <div v-if="tree.length === 0" class="tree-empty">
                     把鼠标移到页面上
@@ -1820,6 +1854,33 @@ onUnmounted(() => {
 .row:hover { background: #F2F4F7; }
 
 /* 勾选（组合用）= 淡绿底 + 绿色复选框 */
+/* 行内「折叠该行」：绝对定位在右上角，不参与布局、不挤内容 */
+.row { position: relative; }
+.fold-btn {
+    position: absolute;
+    right: 4px;
+    top: 2px;
+    display: none;
+    border: 1px solid #e5e6eb;
+    background: rgba(255, 255, 255, .96);
+    color: #86909c;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+.row:hover .fold-btn { display: block; }
+.fold-btn:hover { border-color: #00aeec; color: #00aeec; }
+
+/* 折叠后：这一行强制单行 */
+.row.folded .name { white-space: nowrap; }
+.row.folded .html {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: block;
+}
+
 .row.checked { background: #EAF9EE; }
 
 /* 选中（锁定）= 淡蓝底 + 左侧 3px 蓝条 + 加粗

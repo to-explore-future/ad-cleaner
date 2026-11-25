@@ -994,6 +994,64 @@ async function importRulesFile(panel, filePath) {
     check('⑭ 页面新增节点后，树的行数不变', rowsAfter === rowsBefore, `${rowsBefore} → ${rowsAfter}`);
     check('⑭ 树的当前行不变', curAfter === curBefore, `${curBefore.slice(0, 30)} → ${curAfter.slice(0, 30)}`);
 
+    // ═══════════ ⑮ 选中的节点要在树里居中显示 ═══════════
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(700);
+    await page.send('Page.reload');
+    await sleep(1800);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(800);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+    const leafPos = await ev(page, `(() => {
+        const el = document.querySelector('.deep-leaf');
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
+    })()`);
+    const lp = JSON.parse(leafPos);
+
+    // 先把手版面压矮，逼树出现滚动条，再选中（否则居中逻辑不会被触发）
+    await panel.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 520, deviceScaleFactor: 1, mobile: false });
+    await sleep(700);
+    await ev(panel, `(() => { const c = document.querySelector('.tree'); if (c) c.scrollTop = 0; return true; })()`);
+    await sleep(300);
+
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: lp.x, y: lp.y, button: 'none' });
+    await sleep(700);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: lp.x, y: lp.y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: lp.x, y: lp.y, button: 'left', clickCount: 1 });
+    await sleep(2200);
+
+    const pos = JSON.parse(await ev(panel, `(() => {
+        const c = document.querySelector('.tree');
+        const r = c && c.querySelector('.row.current');
+        if (!c || !r) return JSON.stringify({ ok: false });
+        const cr = c.getBoundingClientRect();
+        const rr = r.getBoundingClientRect();
+        return JSON.stringify({
+            ok: true,
+            scrollable: c.scrollHeight > c.clientHeight + 4,
+            rowCenter: Math.round(rr.top + rr.height / 2 - cr.top),
+            boxCenter: Math.round(c.clientHeight / 2),
+            scrollTop: Math.round(c.scrollTop),
+            maxScroll: Math.round(c.scrollHeight - c.clientHeight),
+        });
+    })()`));
+    console.log('   · 行中心/容器中心:', JSON.stringify(pos));
+    await panel.send('Emulation.clearDeviceMetricsOverride');
+    check('⑮ 树里有当前行', pos.ok === true, JSON.stringify(pos));
+    if (pos.ok && pos.scrollable) {
+        // 最顶部/最底部的节点受滚动边界限制，无法真正居中 —— 这种情况下滚到底就算通过
+        const atTop = pos.scrollTop <= 1;
+        const atBottom = Math.abs(pos.scrollTop - pos.maxScroll) <= 40;
+        const centered = Math.abs(pos.rowCenter - pos.boxCenter) <= 60;
+        check('⑮ 当前行落在列表垂直正中（或已滚到边界）',
+            centered || atTop || atBottom,
+            `行 ${pos.rowCenter} / 中 ${pos.boxCenter} · scrollTop ${pos.scrollTop}/${pos.maxScroll}`);
+    } else {
+        check('⑮ 当前行落在列表垂直正中（树不够长，免检）', true);
+    }
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

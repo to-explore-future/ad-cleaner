@@ -775,10 +775,32 @@ function stopPolling(): void {
 }
 
 // 选中层变化时，把树里的当前行滚到视口中央，保证一眼能看到
-watch(currentPath, async () => {
+/** 树里"当前行"的路径（不依赖 currentPath，那个有时是空的） */
+const currentRowPath = computed(() => tree.value.find((n) => n.current)?.path ?? '');
+
+/** 把当前行滚到列表的**正中**（不是只让它露出来） */
+function centerCurrentRow(): void {
+    const c = treeEl.value;
+    if (!c) return;
+    const row = c.querySelector('.row.current') as HTMLElement | null;
+    if (!row) return;
+    const cr = c.getBoundingClientRect();
+    const rr = row.getBoundingClientRect();
+    // 目标：行中心 == 容器中心
+    const delta = rr.top - cr.top - (c.clientHeight - rr.height) / 2;
+    if (Math.abs(delta) < 4) return;
+    c.scrollTo({ top: c.scrollTop + delta, behavior: 'smooth' });
+}
+
+watch(currentRowPath, async () => {
     await nextTick();
-    const row = treeEl.value?.querySelector('.row.current') as HTMLElement | null;
-    row?.scrollIntoView({ block: 'center' });
+    centerCurrentRow();
+});
+
+// 树刚长出来时（第一次进选择模式）也要居中
+watch(tree, async () => {
+    await nextTick();
+    centerCurrentRow();
 });
 
 // 树重新渲染（展开/换目标）后，只保证当前行在视野内，避免来回跳

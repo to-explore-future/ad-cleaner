@@ -58,8 +58,21 @@ const foldedRows = ref<Set<string>>(new Set());
 async function onRowEnter(path: string): Promise<void> {
     await nextTick();
     const row = treeEl.value?.querySelector(`.row[data-path="${path}"]`) as HTMLElement | null;
-    // 用整行高度判断：单行约 24px，折行后会明显变高
-    hoverMultiPath.value = row && row.getBoundingClientRect().height > 30 ? path : '';
+    const htmlEl = row?.querySelector('.html') as HTMLElement | null;
+    if (!htmlEl) {
+        hoverMultiPath.value = '';
+        return;
+    }
+    /**
+     * 数真正折了几行：用 Range 拿到文本的每一行矩形，按 top 去重。
+     * 之前用"行高 > 30px"判断，单行行有时也会超 30，导致单行也冒出「折叠该行」。
+     */
+    const range = document.createRange();
+    range.selectNodeContents(htmlEl);
+    const tops = new Set<number>();
+    for (const r of Array.from(range.getClientRects())) tops.add(Math.round(r.top));
+    hoverMultiPath.value = tops.size > 1 ? path : '';
+    range.detach?.();
 }
 
 function toggleFold(path: string): void {
@@ -1711,6 +1724,7 @@ onUnmounted(() => {
     flex: none;
     width: 11px;
     height: 11px;
+    margin-top: 3px;
     margin: 0 3px 0 0;
     border: 1px solid #c9cdd4;
     border-radius: 3px;
@@ -1831,8 +1845,9 @@ onUnmounted(() => {
     padding-bottom: 1px;
 }
 /* 换行时复选框和三角号贴在首行文字上，不要飘到顶上 */
-.tree.wrap-src .chk,
-.tree.wrap-src .arrow { margin-top: 2px; }
+/* 复选框、三角号、首行文字三者中线对齐（首行行高 17px） */
+.tree.wrap-src .chk { margin-top: 3px; }
+.tree.wrap-src .arrow { height: 17px; line-height: 17px; margin-top: 0; }
 .tree.wrap-src .name { white-space: normal; word-break: break-all; line-height: 1.5; }
 .tree.wrap-src .html { white-space: normal; word-break: break-all; }
 

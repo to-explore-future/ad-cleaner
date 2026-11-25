@@ -1191,60 +1191,72 @@ async function importRulesFile(panel, filePath) {
     console.log('   · 行数:', rowsBefore19, '→', rowsAfter19, '| 展开数:', expandedBefore19, '→', expandedAfter19);
     check('⑲ 悬浮不改变树的展开状态', expandedAfter19 === expandedBefore19, `${expandedBefore19} → ${expandedAfter19}`);
 
-    // ═══════════ ⑳ 只有多行的行才有「折叠该行」，且在右上角不挤内容 ═══════════
-    // 直接用 ⑲ 里已经展开的树，不重启（避免重载后状态不确定）
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 900, y: 15, button: 'none' });
-    await sleep(900);
-
-    // 移到有长属性的卡片上（那里才有会折行的行），并确保是换行模式
-    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
-    await sleep(900);
+    // ═══════════ ⑳ 折叠按钮只给多行的行；复选框/三角/首行文字中线对齐 ═══════════
     await ev(panel, `(() => {
         const b = document.querySelector('.wrap-btn');
         if (b && /不换行/.test(b.textContent)) b.click();
         return true;
     })()`);
-    await sleep(800);
+    await sleep(700);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(1200);
 
-    const multiPath = await ev(panel, `(() => {
+    // 悬浮"单行"的行 → 不能有按钮
+    const singlePath = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find((x) => x.getBoundingClientRect().height > 30);
+        const r = rows.find((x) => (x.getBoundingClientRect().height ?? 0) <= 26);
         if (!r) return '';
         r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-        return r.dataset.path;
+        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter'));
+        return r.dataset.path ?? '';
     })()`);
-    await sleep(600);
+    await sleep(500);
+    const btnSingle = await ev(panel, `document.querySelectorAll('.tree .row .fold-btn').length`);
+    check('⑳ 单行的行不出现折叠按钮', Number(btnSingle) === 0, `${btnSingle} 个（单行行: ${singlePath}）`);
 
-    const foldInfo = JSON.parse(await ev(panel, `(() => {
+    // 悬浮"多行"的行 → 应该有按钮，且绝对定位
+    const multiInfo = JSON.parse(await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const withBtn = rows.filter((r) => r.querySelector('.fold-btn'));
-        const b = withBtn[0]?.querySelector('.fold-btn');
-        const cs = b ? getComputedStyle(b) : null;
-        const r0 = withBtn[0];
-        const nameW = r0 ? Math.round(r0.querySelector('.name').getBoundingClientRect().width) : 0;
-        const rowW = r0 ? Math.round(r0.getBoundingClientRect().width) : 0;
+        const r = rows.find((x) => (x.getBoundingClientRect().height ?? 0) > 34);
+        if (!r) return JSON.stringify({ found: false });
+        r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter'));
+        return JSON.stringify({ found: true, path: r.dataset.path ?? '' });
+    })()`));
+    await sleep(600);
+    const btnMulti = JSON.parse(await ev(panel, `(() => {
+        const r = document.querySelector('.tree .row .fold-btn');
+        if (!r) return JSON.stringify({ has: false });
+        const cs = getComputedStyle(r);
+        const row = r.closest('.row');
+        const html = row?.querySelector('.html');
+        const chk = row?.querySelector('.chk');
+        const arrow = row?.querySelector('.arrow');
+        const firstLine = (() => {
+            if (!html) return null;
+            const range = document.createRange();
+            range.selectNodeContents(html);
+            const rects = [...range.getClientRects()];
+            return rects[0] ?? null;
+        })();
+        const mid = (el) => { const b = el.getBoundingClientRect(); return Math.round(b.top + b.height / 2); };
         return JSON.stringify({
-            withBtn: withBtn.length,
-            position: cs ? cs.position : '',
-            nameW, rowW,
+            has: true,
+            position: cs.position,
+            chkMid: chk ? mid(chk) : null,
+            arrowMid: arrow ? mid(arrow) : null,
+            lineMid: firstLine ? Math.round(firstLine.top + firstLine.height / 2) : null,
         });
     })()`));
-    console.log('   · 悬浮多行行:', multiPath, JSON.stringify(foldInfo));
-    check('⑳ 悬浮多行的行才出现折叠按钮', foldInfo.withBtn >= 1 && !!multiPath, JSON.stringify(foldInfo));
-    check('⑳ 按钮是绝对定位（不参与布局）', foldInfo.position === 'absolute', foldInfo.position);
-    check('⑳ 按钮不挤占内容宽度', foldInfo.nameW >= foldInfo.rowW - 100, `name ${foldInfo.nameW} / row ${foldInfo.rowW}`);
-
-    // 悬浮一行 → 按钮出现，行高/行数不变
-    const before20 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
-    await ev(panel, `(() => {
-        const r = document.querySelector('.tree .row');
-        r && r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        return true;
-    })()`);
-    await sleep(400);
-    const after20 = await ev(panel, `document.querySelectorAll('.tree .row').length`);
-    check('⑳ 悬浮不改变行数', after20 === before20, `${before20} → ${after20}`);
+    console.log('   · 多行行:', JSON.stringify(multiInfo), JSON.stringify(btnMulti));
+    check('⑳ 多行的行出现折叠按钮', btnMulti.has === true, JSON.stringify(btnMulti));
+    check('⑳ 按钮绝对定位（浮在文字上，不占垂直空间）', btnMulti.position === 'absolute', btnMulti.position);
+    if (btnMulti.has) {
+        const d1 = Math.abs((btnMulti.chkMid ?? 0) - (btnMulti.arrowMid ?? 0));
+        const d2 = Math.abs((btnMulti.chkMid ?? 0) - (btnMulti.lineMid ?? 0));
+        check('⑳ 复选框/三角/首行文字中线对齐（误差 ≤2px）', d1 <= 2 && d2 <= 2,
+            `chk ${btnMulti.chkMid} / arrow ${btnMulti.arrowMid} / line ${btnMulti.lineMid}`);
+    }
 
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);

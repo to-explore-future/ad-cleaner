@@ -141,11 +141,12 @@ async function importRulesFile(panel, filePath) {
     await sleep(2500);
 
     // ① 面板自己找到页面
-    const site = await ev(panel, `document.querySelector('.site')?.innerText ?? ''`);
+    // 界面上不再显示域名了，改从根节点的 data-domain 读（能力没变，只是不占地方）
+    const site = await ev(panel, `document.querySelector('[data-domain]')?.dataset.domain ?? ''`);
     check('① 面板自动认出当前标签页', site.includes('127.0.0.1'), site);
 
-    const dupTitles = await ev(panel, `document.querySelectorAll('.head .title').length`);
-    check('① 面板不重复显示插件名（标题栏已有）', Number(dupTitles) === 0, `${dupTitles} 个`);
+    const domainShown = await ev(panel, `document.body.innerText.includes('127.0.0.1')`);
+    check('① 界面上不显示域名（省地方）', domainShown === false, String(domainShown));
 
     const disabled = await ev(panel, `document.querySelector('.primary')?.disabled ?? true`);
     check('① 按钮可用（不是在"不支持"状态）', disabled === false, 'disabled=' + disabled);
@@ -1170,7 +1171,7 @@ async function importRulesFile(panel, filePath) {
         const r = rows.find((x) => x.getBoundingClientRect().height <= 30);
         if (!r) return 'no-single';
         r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+        r.dispatchEvent(new MouseEvent('mouseenter'));
         return r.dataset.path;
     })()`);
     await sleep(500);
@@ -1182,7 +1183,7 @@ async function importRulesFile(panel, filePath) {
     // 在一堆行上来回悬浮
     await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        rows.slice(0, 12).forEach((r) => r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter')));
+        rows.slice(0, 12).forEach((r) => r.dispatchEvent(new MouseEvent('mouseenter')));
         return true;
     })()`);
     await sleep(700);
@@ -1207,7 +1208,7 @@ async function importRulesFile(panel, filePath) {
         const r = rows.find((x) => (x.getBoundingClientRect().height ?? 0) <= 26);
         if (!r) return '';
         r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter'));
+        r.dispatchEvent(new MouseEvent('mouseenter'));
         return r.dataset.path ?? '';
     })()`);
     await sleep(500);
@@ -1220,7 +1221,7 @@ async function importRulesFile(panel, filePath) {
         const r = rows.find((x) => (x.getBoundingClientRect().height ?? 0) > 34);
         if (!r) return JSON.stringify({ found: false });
         r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-        r.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter'));
+        r.dispatchEvent(new MouseEvent('mouseenter'));
         return JSON.stringify({ found: true, path: r.dataset.path ?? '' });
     })()`));
     await sleep(600);

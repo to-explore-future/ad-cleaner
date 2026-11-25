@@ -50,29 +50,43 @@ const wrapSource = ref(true);
  *   行高 > 26px 才算多行 → 才显示「折叠该行」。
  * 单行的行永远不显示这个按钮。
  */
-const hoverMultiPath = ref('');
+const hoverMultiPath = ref<string | null>(null);
 /** 被折叠成单行的节点 */
 const foldedRows = ref<Set<string>>(new Set());
 
 /** 悬浮到某一行：当场量它是不是多行 */
 async function onRowEnter(path: string): Promise<void> {
     await nextTick();
+    // 已折叠的行要能再展开：它现在是单行，但按钮必须还在
+    if (foldedRows.value.has(path)) {
+        hoverMultiPath.value = path;
+        return;
+    }
     const row = treeEl.value?.querySelector(`.row[data-path="${path}"]`) as HTMLElement | null;
-    const htmlEl = row?.querySelector('.html') as HTMLElement | null;
-    if (!htmlEl) {
-        hoverMultiPath.value = '';
+    const nameEl = row?.querySelector('.name') as HTMLElement | null;
+    if (!nameEl) {
+        hoverMultiPath.value = null;
         return;
     }
     /**
      * 数真正折了几行：用 Range 拿到文本的每一行矩形，按 top 去重。
-     * 之前用"行高 > 30px"判断，单行行有时也会超 30，导致单行也冒出「折叠该行」。
+     * 量的是整行 `.name`（源码 + 文字），不是只量 `.html` ——
+     * 文字被挤到第二行时也算多行。
      */
     const range = document.createRange();
-    range.selectNodeContents(htmlEl);
+    range.selectNodeContents(nameEl);
     const tops = new Set<number>();
-    for (const r of Array.from(range.getClientRects())) tops.add(Math.round(r.top));
-    hoverMultiPath.value = tops.size > 1 ? path : '';
+    for (const r of Array.from(range.getClientRects())) {
+        if (r.width <= 0 || r.height <= 0) continue;
+        tops.add(Math.round(r.top));
+    }
+    hoverMultiPath.value = tops.size > 1 ? path : null;
     range.detach?.();
+}
+
+/** 鼠标离开这一行 → 收起按钮（移到行内的按钮上不算离开） */
+function onRowLeave(path: string): void {
+    if (hoverMultiPath.value === path) hoverMultiPath.value = null;
 }
 
 function toggleFold(path: string): void {
@@ -849,7 +863,7 @@ const preserveScroll = ref<number | null>(null);
 let preserveUntil = 0;
 
 watch(tree, async () => {
-    hoverMultiPath.value = '';
+    hoverMultiPath.value = null;
     if (preserveScroll.value == null || Date.now() > preserveUntil) return;
     await nextTick();
     if (treeEl.value) treeEl.value.scrollTop = preserveScroll.value;
@@ -926,24 +940,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-    <div class="panel">
-        <header class="head">
-            <!-- 侧边栏标题栏已经写了插件名，这里不再重复，只显示当前站点 -->
-            <div class="head-main">
-                <div class="site big">{{ domain || '当前页面不可用' }}</div>
-            </div>
-            <button class="head-btn" title="弹出成独立窗口（可拖动、可调大小）" @click="popOut">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <path d="M14 4h6v6M20 4l-8 8" /><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
-                </svg>
-            </button>
-            <button class="head-btn" title="产品介绍 / 版本进度" @click="openHomepage">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
-                    <circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 8h.01" />
-                </svg>
-            </button>
-        </header>
-
+    <div class="panel" :data-domain="domain">
         <!-- ═══════════ 规则列表 ═══════════ -->
         <template v-if="!picking">
             <div class="switch-row">
@@ -985,6 +982,16 @@ onUnmounted(() => {
                     <span class="rf-spacer"></span>
                     <button class="rf-link" @click="triggerImport">导入</button>
                     <button class="rf-link" @click="onExport">导出</button>
+                    <button class="head-btn sm" title="弹出成独立窗口" @click="popOut">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path d="M14 4h6v6M20 4l-8 8" /><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
+                        </svg>
+                    </button>
+                    <button class="head-btn sm" title="产品介绍 / 版本进度" @click="openHomepage">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 8h.01" />
+                        </svg>
+                    </button>
                 </div>
                 <div v-if="rules.length > 0 && visibleRules.length === 0 && ruleFilter === 'page'" class="empty">
                     这个页面上没有需要拦的东西<br />
@@ -1061,12 +1068,21 @@ onUnmounted(() => {
             <div class="pick-head">
                 <div class="pick-title">{{ editingId ? '修改规则' : '选择模式' }}</div>
                 <div class="pick-hint">
-                    <span>鼠标在页面上移动，点一下选中；要往外扩一层，就在下边点它的上级</span>
                     <button
                         class="wrap-btn"
                         :class="{ on: wrapSource }"
                         @click="wrapSource = !wrapSource"
                     >{{ wrapSource ? '源码换行中' : '源码不换行' }}</button>
+                    <button class="head-btn sm" title="弹出成独立窗口" @click="popOut">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path d="M14 4h6v6M20 4l-8 8" /><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
+                        </svg>
+                    </button>
+                    <button class="head-btn sm" title="产品介绍 / 版本进度" @click="openHomepage">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 8h.01" />
+                        </svg>
+                    </button>
                 </div>
             </div>
 
@@ -1080,6 +1096,7 @@ onUnmounted(() => {
                 和页面连不上 —— 刷新一下这个页面，再点「选中要拦的东西」
             </div>
 
+            <div class="tree-wrap">
             <div ref="treeEl" class="tree" :class="{ 'wrap-src': wrapSource }">
                 <div
                     v-for="n in tree"
@@ -1088,6 +1105,7 @@ onUnmounted(() => {
                     :class="{ current: n.current, checked: checkedPaths.has(n.path), folded: foldedRows.has(n.path) }"
                     :data-path="n.path"
                     @mouseenter="onRowEnter(n.path)"
+                    @mouseleave="onRowLeave(n.path)"
                     :style="{ paddingLeft: 2 + n.depth * 7 + 'px' }"
                 >
                     <!-- 勾选：用来组合成规则 -->
@@ -1115,15 +1133,19 @@ onUnmounted(() => {
                         <span class="html">{{ n.html }}</span>
                         <span v-if="n.text && !n.hasChildren" class="txt">"{{ n.text.slice(0, 40) }}"</span>
                     </span>
-                    <!-- 只有多行的行才在右上角显示「折叠该行」 -->
+
+                    <!-- 只有内容超过一行的标签才在行尾/右上角浮出折叠按钮 -->
                     <button
                         v-if="hoverMultiPath === n.path"
+                        class="fold-btn"
+                        :title="foldedRows.has(n.path) ? '展开成多行' : '折叠成单行'"
                         @click.stop="toggleFold(n.path)"
                     >{{ foldedRows.has(n.path) ? '展开' : '折叠该行' }}</button>
                 </div>
                 <div v-if="tree.length === 0" class="tree-empty">
                     把鼠标移到页面上
                 </div>
+            </div>
             </div>
 
             <div class="pick-info">
@@ -1309,6 +1331,8 @@ onUnmounted(() => {
 
 .head { display: flex; align-items: center; gap: 10px; }
 .head-main { flex: 1; min-width: 0; }
+
+.head-btn.sm { width: 26px; height: 26px; padding: 0; }
 
 .head-btn {
     flex: none;
@@ -1871,21 +1895,28 @@ onUnmounted(() => {
 /* 勾选（组合用）= 淡绿底 + 绿色复选框 */
 /* 行内「折叠该行」：绝对定位在右上角，不参与布局、不挤内容 */
 .row { position: relative; }
+.tree-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+
+/**
+ * 「折叠该行」：浮在**当前这一行**的右上角，不参与布局、不挤内容。
+ * 只有内容真的超过一行的行才会渲染它（见 onRowEnter 的 Range 测量）。
+ */
 .fold-btn {
     position: absolute;
+    top: 1px;
     right: 4px;
-    top: 2px;
-    display: none;
-    border: 1px solid #e5e6eb;
-    background: rgba(255, 255, 255, .96);
-    color: #86909c;
-    font-size: 10px;
+    z-index: 20;
+    border: 1px solid #1677ff;
+    background: rgba(255, 255, 255, .97);
+    color: #1677ff;
+    font-size: 10.5px;
+    line-height: 16px;
     padding: 1px 6px;
-    border-radius: 8px;
+    border-radius: 5px;
     cursor: pointer;
+    box-shadow: 0 1px 4px rgba(22, 119, 255, .18);
 }
-.row:hover .fold-btn { display: block; }
-.fold-btn:hover { border-color: #00aeec; color: #00aeec; }
+.fold-btn:hover { background: #1677ff; color: #fff; }
 
 /* 折叠后：这一行强制单行 */
 .row.folded .name { white-space: nowrap; }

@@ -225,8 +225,8 @@ const displayOf = (page, sel) => ev(page, `(() => {
     console.log('   · 悬停时的树:', JSON.stringify(hoverChain));
     check('③ 悬停页面时右侧树自动展开祖先链', hoverChain.length >= 5,
         `${hoverChain.length} 层`);
-    const curTag = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
-    check('③ 当前行是 img（鼠标实际命中的）', curTag === 'img', curTag || '(无)');
+    const curTag = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent?.trim() ?? ''`);
+    check('③ 当前行是 img（鼠标实际命中的）', /^<img/.test(curTag), curTag || '(无)');
 
     // ═══════════ ④ 点击锁定 ═══════════
     await clickMouse(page, 150, 150);
@@ -240,7 +240,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // ═══════════ ⑤ 在树里点祖先，往外扩一层 ═══════════
     const clickRow = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('ad-box'));
+        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
         if (!r) return -1;
         r.querySelector('.name').click();
         return 1;

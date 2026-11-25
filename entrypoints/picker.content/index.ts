@@ -1,6 +1,6 @@
 import { buildHideCss, loadRulesFor, loadSettings } from '@/utils/rules';
 import { ancestorChain, buildBroadSelector, buildSelector, countMatches, describeElement } from '@/utils/selector';
-import type { BlockRule, ElementInfo, RuleCondition, Settings } from '@/utils/types';
+import type { BlockRule, ElementInfo, RuleCondition, RulePart, Settings } from '@/utils/types';
 
 /**
  * 页面侧的「选择器 + 规则执行器」。
@@ -139,6 +139,75 @@ function applyConditionalRules(): void {
     }
 }
 
+// ───────────────────────── 组合标签规则 ─────────────────────────
+
+function safeMatches(el: Element, selector: string): boolean {
+    try {
+        return el.matches(selector);
+    } catch {
+        return false;
+    }
+}
+
+/** 某个元素**正好**往下 depth 层的所有后代 */
+function descendantsAtDepth(el: Element, depth: number): Element[] {
+    let level: Element[] = [el];
+    for (let d = 0; d < depth; d++) {
+        const next: Element[] = [];
+        for (const e of level) for (const c of Array.from(e.children)) next.push(c);
+        if (next.length === 0) return [];
+        level = next;
+    }
+    return level;
+}
+
+/**
+ * 组合规则是否命中。
+ *
+ * ⚠️ 层级差**严格**校验：规则说"往下第 3 层是 .ad-wrap"，
+ *    真实页面第 3 层换成别的东西 → 不命中（用户明确要这个语义）。
+ */
+function matchesParts(root: Element, parts: RulePart[]): boolean {
+    let cur = root;
+    for (let i = 1; i < parts.length; i++) {
+        const p = parts[i];
+        const level = descendantsAtDepth(cur, p.relDepth);
+        const next = level.find(
+            (el) =>
+                safeMatches(el, p.selector) &&
+                // 文字约束：这一段必须包含指定文字（广告/时长 靠这个区分）
+                (!p.text ||
+                    ((el as HTMLElement).innerText ?? el.textContent ?? '').includes(p.text)),
+        );
+        if (!next) return false;
+        cur = next;
+    }
+    return true;
+}
+
+/** 把组合规则命中的元素标出来 / 删掉 */
+function applyPartRules(): void {
+    const list = rules.filter((r) => r.enabled && r.parts && r.parts.length > 1);
+    if (list.length === 0) return;
+
+    for (const r of list) {
+        let anchors: Element[] = [];
+        try {
+            anchors = Array.from(document.querySelectorAll(r.parts![0].selector));
+        } catch {
+            continue;
+        }
+        const head = r.parts![0];
+        for (const el of anchors) {
+            if (head.text &&
+                !((el as HTMLElement).innerText ?? el.textContent ?? '').includes(head.text)) continue;
+            if (!matchesParts(el, r.parts!)) continue;
+            if (r.action === 'remove') el.remove();
+            else el.classList.add(BLOCKED_CLASS);
+        }
+    }
+}
+
 /** 执行「删除」类规则（这些没法用 CSS 做，只能真删）。 */
 function applyRemovals(): void {
     for (const r of rules) {
@@ -154,6 +223,7 @@ function applyAll(): void {
     rewriteStyle();
     applyRemovals();
     applyConditionalRules();
+    applyPartRules();
 }
 
 /** 页面是单页应用，节点会不断重挂 —— 用观察器兜住「删除」类规则。 */
@@ -163,7 +233,7 @@ let removeTimer: number | null = null;
 function watchRemovals(): void {
     if (removeObserver) return;
     const hasRemoveRule = () =>
-        rules.some((r) => r.enabled && (r.action === 'remove' || !!r.condition));
+        rules.some((r) => r.enabled && (r.action === 'remove' || !!r.condition || !!r.parts));
     removeObserver = new MutationObserver(() => {
         if (!hasRemoveRule()) return;
         if (removeTimer != null) return;
@@ -171,6 +241,7 @@ function watchRemovals(): void {
             removeTimer = null;
             applyRemovals();
             applyConditionalRules();
+            applyPartRules();
         }, 200);
     });
     const start = () => {
@@ -184,6 +255,8 @@ function watchRemovals(): void {
 
 let host: HTMLElement | null = null;
 let box: HTMLElement | null = null;
+/** 跟随鼠标的浅色框（锁定后也显示，但不改变选中） */
+let hoverBox: HTMLElement | null = null;
 
 function ensureOverlay(): void {
     if (host && host.isConnected) return;
@@ -195,20 +268,45 @@ function ensureOverlay(): void {
     root.innerHTML = `
         <style>
             :host { all: initial; }
+            .hover {
+                position: fixed; pointer-events: none; box-sizing: border-box;
+                border: 1px dashed rgba(0, 174, 236, .8); border-radius: 2px;
+            }
             .box {
                 position: fixed; pointer-events: none; box-sizing: border-box;
                 border: 2px solid #00aeec; background: rgba(0, 174, 236, .14);
                 border-radius: 2px; transition: none;
             }
         </style>
+        <div class="hover" hidden></div>
+        <div class="hover" hidden></div>
         <div class="box" hidden></div>
     `;
     box = root.querySelector('.box');
+    hoverBox = root.querySelector('.hover');
+    hoverBox = root.querySelector('.hover');
     document.documentElement.appendChild(host);
 }
 
 function hideOverlay(): void {
     if (box) box.hidden = true;
+    if (hoverBox) hoverBox.hidden = true;
+    if (hoverBox) hoverBox.hidden = true;
+}
+
+/** 画跟随鼠标的浅色框 */
+function paintHover(el: Element | null): void {
+    if (!hoverBox) return;
+    if (!el) {
+        hoverBox.hidden = true;
+        return;
+    }
+    const r = el.getBoundingClientRect();
+    hoverBox.hidden = false;
+    hoverBox.style.left = r.left + 'px';
+    hoverBox.style.top = r.top + 'px';
+    hoverBox.style.width = r.width + 'px';
+    hoverBox.style.height = r.height + 'px';
 }
 
 function paint(el: Element | null): void {
@@ -326,6 +424,32 @@ export interface TreeNodeInfo {
     hasChildren: boolean;
     expanded: boolean;
     current: boolean;
+    /** 开标签的源码，如 `<div class="ad-box" id="x">`（像 DevTools 那样展示） */
+    html: string;
+    /** 节点自己的文字内容（截断），让用户知道这段里写的是什么 */
+    text: string;
+}
+
+/** 这些节点的 textContent 不是"页面上的文字"，不要展示 */
+const NO_TEXT_TAGS = new Set(['html', 'head', 'style', 'script', 'meta', 'link', 'title', 'noscript']);
+
+/** 这些属性没用，展示时跳过 */
+const SKIP_ATTR = new Set(['data-v-', 'onload', 'onerror', 'onclick']);
+
+/** 拼出开标签源码：<tag attr="v" ...> —— 就是 DevTools 左边那一行 */
+function openTagSource(el: Element): string {
+    const tag = el.tagName.toLowerCase();
+    let out = `<${tag}`;
+    for (const a of Array.from(el.attributes)) {
+        if (SKIP_ATTR.has(a.name) || a.name.startsWith('data-v-')) continue;
+        let v = a.value.replace(/\s+/g, ' ');
+        // 去掉我们临时打的标记类，别让用户看到 __adc_match 这种东西
+        if (a.name === 'class') v = v.split(' ').filter((c) => c && !c.startsWith('__adc_')).join(' ');
+        if (v.length > 60) v = v.slice(0, 60) + '…';
+        out += ` ${a.name}="${v}"`;
+        if (out.length > 160) { out += ' …'; break; }
+    }
+    return out + '>';
 }
 
 /** 最多序列化多少节点（大页面别把面板撑爆） */
@@ -351,6 +475,14 @@ function buildTree(): TreeNodeInfo[] {
             hasChildren: el.children.length > 0,
             expanded: isOpen,
             current: key === currentPathKey,
+            html: openTagSource(el),
+            // 用 textContent（不触发排版）；innerText 对 html/body 这种大节点太贵，
+            // 整棵树每 100ms 算一次会把面板拖慢
+            // 只取"用户看得见的文字"：html/head/style/script 的 textContent
+            // 会把 <style> 里的 CSS 源码也算进去（会污染预览）
+            text: NO_TEXT_TAGS.has(el.tagName.toLowerCase())
+                ? ''
+                : (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
         });
         if (!isOpen) return;
         Array.from(el.children).forEach((child, i) => walk(child, [...path, i]));
@@ -450,6 +582,12 @@ function updateFollowBox(): void {
 function setSelected(el: Element, opts: { repaint?: boolean } = {}): void {
     if (isPreviewing()) revertPreview();
     locked = true;
+    // 记下它在整棵树里的位置，并展开到它 —— 否则树的"当前行"会停在 html
+    const p = elementPath(el);
+    if (p) {
+        currentPathKey = keyOfPath(p);
+        expandTo(p);
+    }
     showMatches(buildBroadSelector(el));
     chain = ancestorChain(el);
     currentIndex = chain.length - 1;
@@ -523,8 +661,20 @@ function onMove(e: MouseEvent): void {
      *    现在：锁定后高亮框钉在被选中的那一层，鼠标怎么动都不改变；
      *    想换一个目标，再点一下页面就行（onClick 会重新锁定）。
      */
-    if (locked) return;
+    // 鼠标落在页面空白/根节点上 → 不要动树（否则整行会跳到 html）
+    if (el === document.documentElement) {
+        paintHover(null);
+        return;
+    }
 
+    // 锁定之后：选中框/树/选择器都冻住，但鼠标下仍给一个浅色框，
+    // 让用户看清"下次点会点到哪"
+    if (locked) {
+        paintHover(el);
+        return;
+    }
+
+    paintHover(el);
     paint(el);
     showMatches(buildBroadSelector(el));
 

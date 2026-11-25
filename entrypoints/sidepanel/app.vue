@@ -40,8 +40,10 @@ const settings = ref<Settings>({ showEffect: true });
 const picking = ref(false);
 const editingId = ref<string | null>(null);
 /** 完整 DOM 树（扁平化后的一串节点） */
-const tree = ref<{ path: string; depth: number; tag: string; id: string; classes: string[]; hasChildren: boolean; expanded: boolean; current: boolean }[]>([]);
+const tree = ref<{ path: string; depth: number; tag: string; id: string; classes: string[]; hasChildren: boolean; expanded: boolean; current: boolean; text: string; html: string }[]>([]);
 const currentPath = ref('');
+/** 组合规则里勾选的标签（路径集合） */
+const checkedPaths = ref<Set<string>>(new Set());
 const currentIndex = ref(-1);
 const selector = ref('');
 const matchCount = ref(0);
@@ -275,6 +277,21 @@ async function onToggleEffect(): Promise<void> {
     showToast(settings.value.showEffect ? '悬浮规则可预览影响范围' : '已关闭预览');
 }
 
+/**
+ * 弹出成独立窗口。
+ *
+ * 侧边栏太窄，组合规则这种要多行输入的活根本铺不开；
+ * 弹成窗口后可以自己拖大（F12 的分离模式也是这个道理）。
+ * 带上 ?tabId= 让窗口锁定在同一个页面，不然弹窗里
+ * currentWindow 是它自己，找不到该操作哪个标签页。
+ */
+async function popOut(): Promise<void> {
+    const url =
+        chrome.runtime.getURL('sidepanel.html') + (tabId.value != null ? `?tabId=${tabId.value}` : '');
+    await chrome.windows.create({ url, type: 'popup', width: 430, height: 780 });
+    window.close();
+}
+
 /** 打开产品介绍页（关于 / 版本进度都在那里）。 */
 function openHomepage(): void {
     void chrome.tabs.create({ url: 'https://tianrunye.com/adcleaner' });
@@ -417,6 +434,82 @@ async function setScope(scope: 'one' | 'broad'): Promise<void> {
     if (sel) await sendToTab({ type: 'adc:markMatches', selector: sel });
 }
 
+/** 勾选 / 取消勾选某个树节点 */
+function toggleCheck(path: string): void {
+    const next = new Set(checkedPaths.value);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    checkedPaths.value = next;
+    partTexts.value = [];
+}
+
+/** 每段可选的文字约束（和 checkedNodes 同序） */
+const partTexts = ref<string[]>([]);
+
+/** 勾选出来的节点（按树的先后顺序，外层在前） */
+const checkedNodes = computed(() =>
+    tree.value.filter((n) => checkedPaths.value.has(n.path)),
+);
+
+/** 选中节点的简写选择器：#id 优先，否则 tag.第一个类，最后退化成 tag */
+function shortSelector(n: { tag: string; id: string; classes: string[] }): string {
+    if (n.id) return `#${CSS.escape(n.id)}`;
+    const cls = n.classes.find((c) => !/^(is|has|js)-/.test(c)) ?? n.classes[0];
+    return cls ? `${n.tag}.${CSS.escape(cls)}` : n.tag;
+}
+
+/** 校验：深度必须一层比一层深，否则组不成链 */
+const composeError = computed(() => {
+    const ns = checkedNodes.value;
+    if (ns.length < 2) return '';
+    for (let i = 1; i < ns.length; i++) {
+        if (ns[i].depth <= ns[i - 1].depth) return '勾选的层级必须一层比一层深（外层在前）';
+    }
+    return '';
+});
+
+/** 把用户在这段内容里划选的文字，填成这一段的文字约束 */
+function useSelection(i: number): void {
+    const sel = window.getSelection()?.toString().trim() ?? '';
+    if (!sel) {
+        showToast('先在下面那段内容里划选几个字');
+        return;
+    }
+    const next = [...partTexts.value];
+    next[i] = sel.slice(0, 40);
+    partTexts.value = next;
+}
+
+/** 把勾选的标签组合成一条规则 */
+async function composeRule(): Promise<void> {
+    const ns = checkedNodes.value;
+    if (ns.length < 2 || composeError.value) return;
+
+    const parts = ns.map((n, i) => {
+        const t = (partTexts.value[i] ?? '').trim();
+        return {
+            selector: shortSelector(n),
+            relDepth: i === 0 ? 0 : n.depth - ns[i - 1].depth,
+            ...(t ? { text: t } : {}),
+        };
+    });
+
+    const rule: BlockRule = {
+        id: editingId.value ?? newRuleId(),
+        domain: domain.value,
+        selector: parts[0].selector,
+        action: pickAction.value,
+        enabled: true,
+        label: parts.map((p) => (p.text ? `${p.selector}[${p.text}]` : p.selector)).join(' ▸ '),
+        createdAt: Date.now(),
+        parts,
+    };
+    await upsertRule(rule);
+    checkedPaths.value = new Set();
+    await sendToTab({ type: 'adc:reapply' });
+    await refreshRules();
+}
+
 /** 展开 / 收起树节点 */
 function togglePath(path: string): void {
     void sendToTab({ type: 'adc:togglePath', path });
@@ -546,6 +639,16 @@ async function pollPickerState(): Promise<void> {
         }>({ type: 'adc:state' });
         if (st?.ok) {
             pollFailures.value = 0;
+            /**
+             * ⚠️ 轮询**不许覆盖树和当前行**。
+             *
+             * 踩过：锁定之后把鼠标往抽屉这边滑，路上会掠过别的元素，
+             * 内容脚本虽然早就 return 了，但面板每 100ms 用轮询结果
+             * 重刷一次树，用户看到的就是"右侧标签树跟着鼠标变"。
+             * 树只在内容脚本主动推送（adc:pickerChanged）时更新。
+             */
+            tree.value = st.tree ?? [];
+            currentPath.value = st.currentPath ?? '';
             selector.value = st.selector;
             matchCount.value = st.matchCount;
             broadSelector.value = st.broadSelector ?? '';
@@ -658,6 +761,11 @@ onUnmounted(() => {
             <div class="head-main">
                 <div class="site big">{{ domain || '当前页面不可用' }}</div>
             </div>
+            <button class="head-btn" title="弹出成独立窗口（可拖动、可调大小）" @click="popOut">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path d="M14 4h6v6M20 4l-8 8" /><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
+                </svg>
+            </button>
             <button class="head-btn" title="产品介绍 / 版本进度" @click="openHomepage">
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
                     <circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 8h.01" />
@@ -741,6 +849,9 @@ onUnmounted(() => {
                     <div class="rule-main">
                         <div class="rule-label">
                             {{ r.label || r.selector }}
+                            <span v-if="r.parts && r.parts.length > 1" class="cond-tag">
+                                {{ r.parts.length }} 层组合
+                            </span>
                             <span v-if="r.condition" class="cond-tag">
                                 {{ r.condition.type === 'text' ? `含「${r.condition.value}」` : `含 ${r.condition.value}` }}
                             </span>
@@ -801,6 +912,13 @@ onUnmounted(() => {
                     :class="{ current: n.current }"
                     :style="{ paddingLeft: 4 + n.depth * 11 + 'px' }"
                 >
+                    <!-- 勾选：用来组合成规则 -->
+                    <span
+                        class="chk"
+                        :class="{ on: checkedPaths.has(n.path) }"
+                        @click.stop="toggleCheck(n.path)"
+                    ></span>
+
                     <!-- 展开/收起 -->
                     <span
                         v-if="n.hasChildren"
@@ -816,9 +934,8 @@ onUnmounted(() => {
                         @click="selectPath(n.path)"
                         @mouseenter="hoverPath(n.path)"
                     >
-                        <span class="tag">{{ n.tag }}</span>
-                        <span v-if="n.id" class="id">#{{ n.id }}</span>
-                        <span v-for="c in n.classes" :key="c" class="cls">.{{ c }}</span>
+                        <span class="html">{{ n.html }}</span>
+                        <span v-if="n.text && !n.hasChildren" class="txt">"{{ n.text.slice(0, 40) }}"</span>
                     </span>
                 </div>
                 <div v-if="tree.length === 0" class="tree-empty">
@@ -913,18 +1030,54 @@ onUnmounted(() => {
             </div>
 
             <footer class="foot three">
-                <button class="ghost" @click="cancelPick">取消</button>
-                <button
-                    class="ghost preview"
-                    :class="{ on: previewing }"
-                    :title="previewing ? '恢复页面原样' : '真的应用一次，看看拦完长什么样'"
-                    @click="togglePreview"
-                >
-                    {{ previewing ? '退出预览' : '👁 预览效果' }}
-                </button>
-                <button class="primary" @click="confirmPick">
-                    {{ editingId ? '保存修改' : '拦截这个' }}
-                </button>
+                <!-- 组合标签规则：勾几层 → 一条规则 -->
+                <div v-if="picking && checkedNodes.length > 0" class="compose">
+                    <div class="compose-parts">
+                        <div v-for="(n, i) in checkedNodes" :key="n.path" class="compose-part">
+                            <div class="compose-head">
+                                <span v-if="i > 0" class="compose-gap">▸{{ n.depth - checkedNodes[i - 1].depth }}</span>
+                                <span class="compose-sel">{{ shortSelector(n) }}</span>
+                                <input
+                                    v-model="partTexts[i]"
+                                    class="compose-text"
+                                    placeholder="文字含…（可不填）"
+                                />
+                                <button
+                                    class="compose-pick"
+                                    title="先在下面那段内容里选中几个字，再点这里"
+                                    @click="useSelection(i)"
+                                >选中的字</button>
+                            </div>
+                            <!-- 这段的完整内容：可以在这里划选文字，再点上面的「选中的字」 -->
+                            <div v-if="n.text" class="compose-content">{{ n.text }}</div>
+                        </div>
+                    </div>
+
+                    <div v-if="composeError" class="compose-err">{{ composeError }}</div>
+                    <div class="compose-actions">
+                        <button class="ghost sm" @click="checkedPaths = new Set()">清空</button>
+                        <button
+                            class="primary sm"
+                            :disabled="checkedNodes.length < 2 || !!composeError"
+                            @click="composeRule"
+                        >组合成规则（{{ checkedNodes.length }} 层）</button>
+                    </div>
+                </div>
+
+                <div class="foot-row">
+                    <button class="ghost" @click="cancelPick">取消</button>
+                    <button
+                        class="ghost preview"
+                        :class="{ on: previewing }"
+                        :title="previewing ? '恢复页面原样' : '真的应用一次，看看拦完长什么样'"
+                        @click="togglePreview"
+                    >
+                        {{ previewing ? '退出预览' : '👁 预览效果' }}
+                    </button>
+                    <button class="primary" @click="confirmPick">
+                        {{ editingId ? '保存修改' : '拦截这个' }}
+                    </button>
+                </div>
             </footer>
         </template>
 
@@ -1372,6 +1525,88 @@ onUnmounted(() => {
 }
 
 /* 展开箭头 */
+.chk {
+    flex: none;
+    width: 11px;
+    height: 11px;
+    margin: 0 3px 0 0;
+    border: 1px solid #c9cdd4;
+    border-radius: 3px;
+    background: #fff;
+    cursor: pointer;
+    position: relative;
+}
+.chk.on { background: #00aeec; border-color: #00aeec; }
+.chk.on::after {
+    content: '';
+    position: absolute;
+    left: 3px; top: 0.5px;
+    width: 3px; height: 6px;
+    border: solid #fff;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
+}
+
+.compose {
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    background: #f7f8fa;
+    border-radius: 8px;
+}
+.compose-parts { display: flex; flex-direction: column; gap: 4px; }
+.compose-part { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.compose-head { display: flex; align-items: center; gap: 4px; }
+.compose-gap { color: #00aeec; font-size: 10.5px; flex: none; }
+.compose-sel {
+    flex: 1;
+    min-width: 0;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    color: #1f2329;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.compose-text {
+    flex: none;
+    width: 110px;
+    height: 24px;
+    padding: 0 6px;
+    border: 1px solid #e5e6eb;
+    border-radius: 5px;
+    font-size: 11px;
+    color: #1f2329;
+}
+.compose-text:focus { outline: none; border-color: #00aeec; }
+.compose-pick {
+    flex: none;
+    border: 1px solid #d9d9d9;
+    background: #fff;
+    color: #4e5969;
+    border-radius: 5px;
+    font-size: 10.5px;
+    padding: 3px 6px;
+    cursor: pointer;
+}
+.compose-pick:hover { border-color: #00aeec; color: #00aeec; }
+.compose-content {
+    margin: 2px 0 6px 12px;
+    padding: 4px 6px;
+    background: #fff;
+    border: 1px dashed #e5e6eb;
+    border-radius: 5px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #4e5969;
+    max-height: 54px;
+    overflow-y: auto;
+    user-select: text;
+    cursor: text;
+}
+.compose-err { margin-top: 4px; color: #f53f3f; font-size: 11px; }
+.compose-actions { display: flex; gap: 8px; margin-top: 8px; }
+.compose-actions .sm { flex: 1; height: 30px; font-size: 12px; border-radius: 15px; }
+
 .arrow {
     flex: none;
     width: 14px;
@@ -1396,6 +1631,13 @@ onUnmounted(() => {
 }
 /* 悬浮：很淡的一层 */
 .name:hover { background: #f0f6fa; }
+.txt { color: #6b7280; margin-left: 4px; font-size: 10.5px; }
+.html {
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    color: #7a5af8;
+    white-space: nowrap;
+}
 .row:hover { background: #f7fafc; }
 
 /* 选中：明显加深 + 左侧蓝条 + 加粗，一眼看出选的是哪个 */

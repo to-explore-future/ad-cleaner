@@ -161,8 +161,8 @@ const displayOf = (page, sel) => ev(page, `(() => {
     console.log('   · 树的行数:', treeLen);
     check('③ 右侧显示完整 DOM 树（多行）', Number(treeLen) >= 5, `${treeLen} 行`);
 
-    const curTagA = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
-    check('③ 当前行是鼠标下的那个元素', curTagA === 'img', curTagA || '(无当前行)');
+    const curTagA = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent?.trim() ?? ''`);
+    check('③ 当前行是鼠标下的那个元素', /^<img/.test(curTagA), curTagA || '(无当前行)');
 
     const expandable = await ev(panel, `document.querySelectorAll('.tree .row .arrow:not(.empty)').length`);
     check('③ 树节点可以展开/收起', Number(expandable) > 0, `${expandable} 个可展开`);
@@ -198,7 +198,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // 换一个位置 → 树应该变成另一个元素
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 520, y: 110, button: 'none' });
     await sleep(600);
-    const curB = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    const curB = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent?.trim() ?? ''`);
     console.log('   · 位置 B 当前行:', curB);
     check('③ 换位置后当前行也跟着换', curB !== curTagA, `${curTagA} → ${curB}`);
 
@@ -223,7 +223,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     await sleep(600);
     await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find(x => (x.querySelector('.name')?.textContent ?? '').includes('ad-box'));
+        const r = rows.find(x => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
         r?.querySelector('.name')?.dispatchEvent(new MouseEvent('mouseenter'));
         return true;
     })()`);
@@ -343,7 +343,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // ⑥ 往外扩一层并拦截
     await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find(x => (x.querySelector('.name')?.textContent ?? '').includes('ad-box'));
+        const r = rows.find(x => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
         r?.querySelector('.name')?.click();
         return true;
     })()`);
@@ -482,24 +482,24 @@ const displayOf = (page, sel) => ev(page, `(() => {
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ip.x, y: ip.y, button: 'none' });
     await sleep(700);
 
-    const hitTag = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    const hitTag = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent?.trim() ?? ''`);
     console.log('   · 悬停在图标上，命中到的是:', hitTag);
-    check('⑩ 图标被 pointer-events:none 挡住时，命中到的是父级', hitTag !== 'svg', hitTag);
+    check('⑩ 图标被 pointer-events:none 挡住时，命中到的是父级', !/^<svg/.test(hitTag), hitTag);
 
     // 树里能找到 svg 那一行（因为展开到了当前元素）
-    const hasSvgRow = await ev(panel, `[...document.querySelectorAll('.tree .row .tag')].some((e) => e.textContent === 'svg')`);
+    const hasSvgRow = await ev(panel, `[...document.querySelectorAll('.tree .row .html')].some((e) => /^<svg/.test(e.textContent))`);
     check('⑩ 树里能看到 svg 节点', hasSvgRow === true, String(hasSvgRow));
 
     // 点 svg 那一行 → 选中它
     await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find((x) => x.querySelector('.tag')?.textContent === 'svg');
+        const r = rows.find((x) => /^<svg/.test(x.querySelector('.html')?.textContent ?? ''));
         r && r.querySelector('.name').click();
         return !!r;
     })()`);
     await sleep(900);
 
-    const nowTag = await ev(panel, `document.querySelector('.tree .row.current .tag')?.textContent?.trim() ?? ''`);
+    const nowTag = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent?.trim() ?? ''`);
     const nowSel = await infoVal(panel, '选择器');
     console.log('   · 选中后:', nowTag, '| 选择器:', nowSel);
     check('⑩ 点 svg 行后选中了 svg', /svg\.tiny-icon/.test(nowSel), `${nowTag} / ${nowSel}`);
@@ -555,7 +555,7 @@ const displayOf = (page, sel) => ev(page, `(() => {
     // ② 在右侧树里往上选到「整张卡片」
     const widenedRow = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('feed-item'));
+        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('feed-item'));
         if (!r) return false;
         r.querySelector('.name').click();
         return true;
@@ -628,6 +628,171 @@ const displayOf = (page, sel) => ev(page, `(() => {
         return JSON.stringify(Object.values(g.blockRules || {}).flat().map(r => r.condition || null));
     })()`);
     check('⑩ 存下来的规则带条件', /"type":"text"/.test(savedCond) && /广告/.test(savedCond), savedCond);
+
+    // ═══════════ ⑪ 组合标签规则：勾几层 → 一条规则 ═══════════
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(1000);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(800);
+
+    const chkCount = await ev(panel, `document.querySelectorAll('.tree .row .chk').length`);
+    check('⑪ 树里每个标签左边有复选框', Number(chkCount) > 0, `${chkCount} 个`);
+
+    // 勾选三层：ad-box → ad-wrap → ad-inner
+    const picked = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const want = ['ad-box', 'ad-wrap', 'ad-inner'];
+        let n = 0;
+        for (const key of want) {
+            const r = rows.find((x) => {
+                const t = x.querySelector('.name')?.textContent ?? '';
+                return t.includes(key) && !x.__done;
+            });
+            if (!r) continue;
+            r.__done = true;
+            r.querySelector('.chk').click();
+            n++;
+        }
+        return n;
+    })()`);
+    console.log('   · 勾选:', picked, '| .chk.on:', await ev(panel, `document.querySelectorAll('.tree .chk.on').length`), '| compose:', await ev(panel, `!!document.querySelector('.compose')`), '| footer exists:', await ev(panel, `!!document.querySelector('.foot')`));
+    check('⑪ 能勾多层', Number(picked) === 3, `${picked} 层`);
+    await sleep(600);
+
+    const chainText = await ev(panel, `document.querySelector('.compose-parts')?.innerText.replace(/\\s+/g,' ').trim() ?? ''`);
+    console.log('   · 组合链:', chainText);
+    check('⑪ 显示了组合链（含层级差）', /▸1/.test(chainText), chainText);
+
+    await ev(panel, `(() => {
+        const b = [...document.querySelectorAll('.compose-actions .primary')].find((x) => /组合成规则/.test(x.textContent));
+        b && b.click();
+        return true;
+    })()`);
+    await sleep(1600);
+
+    const partsSaved = await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        const list = Object.values(g.blockRules || {}).flat();
+        return JSON.stringify(list.map((r) => ({ parts: r.parts || null })));
+    })()`);
+    console.log('   · 保存的规则:', partsSaved);
+    check('⑪ 存成了一条三段式规则', (partsSaved.match(/relDepth/g) || []).length === 3, partsSaved);
+
+    const hiddenByParts = await ev(page, `getComputedStyle(document.querySelector('.ad-box')).display`);
+    check('⑪ 组合规则生效，外层容器被隐藏', hiddenByParts === 'none', hiddenByParts);
+
+    // ═══════════ ⑫ 组合规则 + 文字约束（同类里靠文字区分） ═══════════
+    // 先把 ⑪ 留下的选择模式退掉，否则 .primary 是「拦截这个」
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(800);
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(1000);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+    const ftPos = await ev(page, `(() => {
+        const el = document.querySelector('.feed-item:not(.is-ad) .feed-title');
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2) });
+    })()`);
+    const ft = JSON.parse(ftPos);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ft.x, y: ft.y, button: 'none' });
+    await sleep(900);
+
+    // 勾两层：div.feed-item → div.feed-cover（同类里文字不同）
+    const picked2 = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        let n = 0;
+        for (const key of ['feed-item', 'feed-cover']) {
+            const r = rows.find((x) => {
+                const t = x.querySelector('.name')?.textContent ?? '';
+                return t.includes(key) && !x.__d;
+            });
+            if (!r) continue;
+            r.__d = true;
+            r.querySelector('.chk').click();
+            n++;
+        }
+        return n;
+    })()`);
+    check('⑫ 勾选两层（feed-item → feed-cover）', Number(picked2) === 2, `${picked2} 层`);
+    await sleep(500);
+
+    // 树里显示节点的文字内容
+    const nodeTextShown = await ev(panel, `[...document.querySelectorAll('.tree .txt')].length > 0`);
+    check('⑫ 树里显示节点的文字内容', nodeTextShown === true);
+
+    // 第二段加文字约束「广告」
+    await ev(panel, `(() => {
+        const inputs = [...document.querySelectorAll('.compose-text')];
+        const i = inputs[1];
+        if (!i) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(i, '广告');
+        i.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+    })()`);
+    await sleep(500);
+
+    await ev(panel, `(() => {
+        const b = [...document.querySelectorAll('.compose-actions .primary')].find((x) => /组合成规则/.test(x.textContent));
+        b && b.click();
+        return true;
+    })()`);
+    await sleep(1600);
+
+    const savedParts = await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        return JSON.stringify(Object.values(g.blockRules || {}).flat().map((r) => r.parts || null));
+    })()`);
+    console.log('   · 规则:', savedParts);
+    check('⑫ 规则里带上了文字约束', /"text":"广告"/.test(savedParts), savedParts);
+
+    const st12 = JSON.parse(await ev(page, `JSON.stringify({
+        ads: [...document.querySelectorAll('.feed-item.is-ad')].map((e) => getComputedStyle(e).display),
+        normals: [...document.querySelectorAll('.feed-item:not(.is-ad)')].map((e) => getComputedStyle(e).display),
+    })`));
+    console.log('   · 广告:', JSON.stringify(st12.ads), ' 普通:', JSON.stringify(st12.normals));
+    check('⑫ 只拦掉带「广告」字样的那 2 个', st12.ads.every((d) => d === 'none'), JSON.stringify(st12.ads));
+    check('⑫ 普通卡片没被误杀', st12.normals.every((d) => d !== 'none'), JSON.stringify(st12.normals));
+
+    // ═══════════ ⑬ 锁定后鼠标滑向抽屉，树不许变 ═══════════
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(900);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+
+    // (150,150) 命中 .ad-img，是前面几段已经验证过的坐标
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(500);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 150, y: 150, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 150, y: 150, button: 'left', clickCount: 1 });
+    await sleep(900);
+
+    const lockedRow = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent ?? ''`);
+    const lockedSel13 = await infoVal(panel, '选择器');
+    check('⑬ 锁定后树里有当前行', !!lockedRow && !/^<html/.test(lockedRow), lockedRow || '(无)');
+    check('⑬ 确实选中了元素（选择器不是空的）', lockedSel !== '—' && !!lockedSel, lockedSel);
+
+    // 往右边刷地去（模拟鼠标离开页面去够抽屉），沿途掠过大片别的元素
+    for (const pt of [[900, 60], [1000, 300], [1100, 120], [1180, 500]]) {
+        await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt[0], y: pt[1], button: 'none' });
+        await sleep(320);
+    }
+    await sleep(400);
+
+    const afterRow = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent ?? ''`);
+    const afterSel13 = await infoVal(panel, '选择器');
+    console.log('   · 锁定行:', lockedRow, '→', afterRow);
+    check('⑬ 鼠标掠过别的元素，树的当前行不变', afterRow === lockedRow, `${lockedRow} → ${afterRow}`);
+    check('⑬ 选择器也不变', afterSel13 === lockedSel13, `${lockedSel13} → ${afterSel13}`);
 
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);

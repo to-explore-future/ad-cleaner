@@ -79,7 +79,8 @@ export async function saveSettings(s: Settings): Promise<void> {
 export function buildHideCss(rules: BlockRule[], excludeSelector?: string): string {
     const sels = rules
         // 带条件的规则 CSS 表达不了（CSS 没有"包含文字"），交给页面脚本处理
-        .filter((r) => r.enabled && r.action === 'hide' && !r.condition)
+        // 带条件 / 组合标签的规则 CSS 表达不了，交给页面脚本处理
+        .filter((r) => r.enabled && r.action === 'hide' && !r.condition && !r.parts)
         .map((r) => r.selector)
         .filter((s) => s && s !== excludeSelector);
     if (sels.length === 0) return '';

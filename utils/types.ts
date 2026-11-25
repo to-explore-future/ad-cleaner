@@ -13,6 +13,17 @@ export interface RuleCondition {
     value: string;
 }
 
+/**
+ * 组合标签规则的一段：某个选择器，位于上一段的**下方几层**。
+ * parts[0].relDepth 恒为 0（锚点），后面都是相对上一段的层级差。
+ */
+export interface RulePart {
+    selector: string;
+    relDepth: number;
+    /** 可选：这一段元素的文字必须包含这个内容（用来区分同类里的广告） */
+    text?: string;
+}
+
 /** 一条拦截规则。 */
 export interface BlockRule {
     id: string;
@@ -26,6 +37,8 @@ export interface BlockRule {
     label: string;
     /** 可选条件：命中选择器之后，还要满足这个条件才拦 */
     condition?: RuleCondition;
+    /** 组合标签规则：按层级差逐段匹配（有它就优先走这条） */
+    parts?: RulePart[];
     createdAt: number;
 }
 

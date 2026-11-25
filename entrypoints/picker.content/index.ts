@@ -232,6 +232,49 @@ function countRuleMatches(rule: MatchableRule): number {
     return elementsMatchingRule(rule).length;
 }
 
+/**
+ * 找回一条组合规则里每一段对应的树路径。
+ *
+ * 用途：用户点「编辑」一条三段式规则时，面板要把当初勾选的那三个标签
+ * **重新勾上**，而不是只选中第一段。路径按当前页面真实 DOM 算，
+ * 页面上找不到就返回空数组（面板会提示规则已失效）。
+ */
+function partPaths(parts: RulePart[]): string[] {
+    if (!Array.isArray(parts) || parts.length < 2) return [];
+    const head = parts[0];
+    let anchors: Element[] = [];
+    try {
+        anchors = Array.from(document.querySelectorAll(head.selector));
+    } catch {
+        return [];
+    }
+    for (const anchor of anchors) {
+        if (head.text &&
+            !((anchor as HTMLElement).innerText ?? anchor.textContent ?? '').includes(head.text)) continue;
+        const p0 = elementPath(anchor);
+        if (!p0) continue;
+        const paths: string[] = [keyOfPath(p0)];
+        let cur = anchor;
+        let ok = true;
+        for (let i = 1; i < parts.length; i++) {
+            const p = parts[i];
+            const next = descendantsAtDepth(cur, p.relDepth).find(
+                (el) =>
+                    safeMatches(el, p.selector) &&
+                    (!p.text ||
+                        ((el as HTMLElement).innerText ?? el.textContent ?? '').includes(p.text)),
+            );
+            if (!next) { ok = false; break; }
+            const path = elementPath(next);
+            if (!path) { ok = false; break; }
+            paths.push(keyOfPath(path));
+            cur = next;
+        }
+        if (ok && paths.length === parts.length) return paths;
+    }
+    return [];
+}
+
 /** 把组合规则命中的元素标出来 / 删掉 */
 function applyPartRules(): void {
     const list = rules.filter((r) => r.enabled && r.parts && r.parts.length > 1);
@@ -494,6 +537,13 @@ function openTagSource(el: Element): string {
         let v = a.value.replace(/\s+/g, ' ');
         // 去掉我们临时打的标记类，别让用户看到 __adc_match 这种东西
         if (a.name === 'class') v = v.split(' ').filter((c) => c && !c.startsWith('__adc_')).join(' ');
+        /**
+         * 图片的 data URI 是压缩过的整张图，展示出来就是七八行乱码，
+         * 真正有用的 tag/class 全被挤没了。这里只做**显示**截断，不改 DOM。
+         */
+        if ((a.name === 'src' || a.name === 'srcset' || a.name === 'data-src') && v.startsWith('data:')) {
+            v = `${v.slice(0, 32)}…（${a.value.length} 字符）`;
+        }
         // 换行模式下要能看全，所以放宽到 400/1200；不换行时靠 CSS 截断
         if (v.length > 400) v = v.slice(0, 400) + '…';
         out += ` ${a.name}="${v}"`;
@@ -1231,6 +1281,15 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                 } catch {
                     sendResponse({ ok: false, reason: 'bad-selector' });
                 }
+                return false;
+            }
+            case 'adc:partPaths': {
+                // 编辑组合规则：把每一段对应的树路径找回来，并展开到它们
+                const paths = partPaths(Array.isArray(msg.parts) ? (msg.parts as RulePart[]) : []);
+                for (const p of paths) expandTo(pathOfKey(p));
+                invalidateTree();
+                sendResponse({ ok: true, paths });
+                if (paths.length) notifyPanel();
                 return false;
             }
             case 'adc:countAll': {

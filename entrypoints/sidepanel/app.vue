@@ -427,6 +427,8 @@ async function startPick(): Promise<void> {
     allowTreeUpdate.value = false;
     selector.value = '';
     matchCount.value = 0;
+    checkedPaths.value = new Set();
+    partTexts.value = [];
 }
 
 async function startEdit(rule: BlockRule): Promise<void> {
@@ -446,12 +448,34 @@ async function startEdit(rule: BlockRule): Promise<void> {
     allowTreeUpdate.value = false;
     selector.value = '';
     matchCount.value = 0;
+    // 重新编辑时，先清掉上一次的勾选，避免旧规则的三段被带进来
+    checkedPaths.value = new Set();
+    partTexts.value = [];
 
     const res = await sendToTabOrInject<{ ok: boolean }>({
         type: 'adc:selectBySelector', selector: rule.selector,
     });
     if (!res?.ok) {
         showToast('页面上已找不到这条规则的目标，请重新选一个');
+        return;
+    }
+
+    /**
+     * 组合规则要**复现当初勾选的每一层**。
+     * 只选中第一段是不够的：用户点编辑就是想看看这条规则是哪几层组成的。
+     */
+    if (rule.parts && rule.parts.length > 1) {
+        markTreeUpdate();
+        const pp = await sendToTab<{ ok: boolean; paths: string[] }>({
+            type: 'adc:partPaths', parts: rule.parts,
+        });
+        if (pp?.ok && pp.paths?.length === rule.parts.length) {
+            checkedPaths.value = new Set(pp.paths);
+            partTexts.value = rule.parts.map((p) => p.text ?? '');
+            markTreeUpdate();
+        } else {
+            showToast('这条组合规则在页面上已经对不上了，请重新勾选');
+        }
     }
 }
 
@@ -750,11 +774,22 @@ function stopPolling(): void {
     }
 }
 
-// 选中层变化时，把树里的当前行滚进视野
+// 选中层变化时，把树里的当前行滚到视口中央，保证一眼能看到
 watch(currentPath, async () => {
     await nextTick();
     const row = treeEl.value?.querySelector('.row.current') as HTMLElement | null;
-    row?.scrollIntoView({ block: 'nearest' });
+    row?.scrollIntoView({ block: 'center' });
+});
+
+// 树重新渲染（展开/换目标）后，只保证当前行在视野内，避免来回跳
+watch(tree, async () => {
+    await nextTick();
+    const box = treeEl.value;
+    const row = box?.querySelector('.row.current') as HTMLElement | null;
+    if (!box || !row) return;
+    const rb = row.getBoundingClientRect();
+    const tb = box.getBoundingClientRect();
+    if (rb.top < tb.top || rb.bottom > tb.bottom) row.scrollIntoView({ block: 'nearest' });
 });
 
 function onRuntimeMessage(msg: unknown): void {
@@ -993,7 +1028,7 @@ onUnmounted(() => {
                         :class="{ open: n.expanded }"
                         @click.stop="togglePath(n.path)"
                     >{{ n.expanded ? '▾' : '▸' }}</span>
-                    <span v-else class="arrow empty"></span>
+                    <span v-else class="arrow blank"></span>
 
                     <!-- 点这一行 = 选中这个元素 -->
                     <span
@@ -1602,7 +1637,7 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     gap: 2px;
-    height: 24px;
+    height: 22px;
     padding-right: 8px;
     font-size: 12px;
     white-space: nowrap;
@@ -1694,16 +1729,17 @@ onUnmounted(() => {
 
 .arrow {
     flex: none;
-    width: 16px;
+    width: 20px;
     text-align: center;
     color: #86909c;
-    font-size: 12px;
-    line-height: 1;
+    font-size: 17px;
+    line-height: 20px;
     cursor: pointer;
     user-select: none;
 }
 .arrow:hover { color: #00aeec; }
-.arrow.empty { cursor: default; }
+/* ⚠️ 不能用 .empty：面板空状态有 .empty { padding:48px }，会把整行撑高 */
+.arrow.blank { cursor: default; }
 
 /* 节点名（点了就选中） */
 .name {
@@ -1712,7 +1748,7 @@ onUnmounted(() => {
     overflow: hidden;
     text-overflow: ellipsis;
     cursor: pointer;
-    padding: 2px 4px;
+    padding: 1px 4px;
     border-radius: 3px;
 }
 /* 悬浮：很淡的一层 */
@@ -1727,15 +1763,15 @@ onUnmounted(() => {
 /* 换行模式：整行放开，高度自适应 */
 .tree.wrap-src .row {
     height: auto;
-    min-height: 24px;
+    min-height: 22px;
     align-items: flex-start;
-    padding-top: 2px;
-    padding-bottom: 2px;
+    padding-top: 1px;
+    padding-bottom: 1px;
 }
 /* 换行时复选框和三角号贴在首行文字上，不要飘到顶上 */
 .tree.wrap-src .chk,
-.tree.wrap-src .arrow { margin-top: 4px; }
-.tree.wrap-src .name { white-space: normal; word-break: break-all; line-height: 1.55; }
+.tree.wrap-src .arrow { margin-top: 2px; }
+.tree.wrap-src .name { white-space: normal; word-break: break-all; line-height: 1.5; }
 .tree.wrap-src .html { white-space: normal; word-break: break-all; }
 
 /* 单行折叠：这一行强制一行显示 */

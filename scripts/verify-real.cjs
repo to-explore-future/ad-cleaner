@@ -176,8 +176,27 @@ async function importRulesFile(panel, filePath) {
     const curTagA = await ev(panel, `document.querySelector('.tree .row.current .html')?.textContent?.trim() ?? ''`);
     check('③ 当前行是鼠标下的那个元素', /^<img/.test(curTagA), curTagA || '(无当前行)');
 
-    const expandable = await ev(panel, `document.querySelectorAll('.tree .row .arrow:not(.empty)').length`);
+    const expandable = await ev(panel, `document.querySelectorAll('.tree .row .arrow:not(.blank)').length`);
     check('③ 树节点可以展开/收起', Number(expandable) > 0, `${expandable} 个可展开`);
+
+    // 行高必须紧凑：叶子行的三角号曾经误用 .empty（padding:48px），一行被撑到 104px
+    const heightInfo = await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        // 用最短的叶子节点做基准（长源码节点允许多行）
+        const leaf = rows.filter((r) => /同款/.test(r.innerText));
+        const heights = leaf.map((r) => r.offsetHeight);
+        const arrow = document.querySelector('.tree .row .arrow:not(.blank)');
+        return JSON.stringify({
+            maxLeaf: heights.length ? Math.max(...heights) : 0,
+            arrowFont: arrow ? getComputedStyle(arrow).fontSize : '',
+        });
+    })()`);
+    console.log('   · 行高:', heightInfo);
+    {
+        const h = JSON.parse(heightInfo);
+        check('③ 叶子行高紧凑（≤ 26px）', h.maxLeaf > 0 && h.maxLeaf <= 26, `${h.maxLeaf}px`);
+        check('③ 三角号足够大（≥ 16px）', parseFloat(h.arrowFont) >= 16, h.arrowFont);
+    }
 
     const hasSize = await ev(panel, `!!document.querySelector('.tree .size')`);
     check('③ 树里不显示宽高（用户不需要）', hasSize === false, String(hasSize));
@@ -783,6 +802,45 @@ async function importRulesFile(panel, filePath) {
 
     const hiddenByParts = await ev(page, `getComputedStyle(document.querySelector('.ad-box')).display`);
     check('⑪ 组合规则生效，外层容器被隐藏', hiddenByParts === 'none', hiddenByParts);
+
+    // ═══════════ ⑪b 编辑组合规则：勾选状态要复现 ═══════════
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(1200);
+    const clickedEdit = await ev(panel, `(() => {
+        const row = [...document.querySelectorAll('.rule')].find((r) => /3 层组合/.test(r.innerText));
+        if (!row) return false;
+        row.querySelector('.icon[title="编辑"]')?.click();
+        return true;
+    })()`);
+    check('⑪b 规则列表里能找到组合规则并点编辑', clickedEdit === true);
+    await sleep(1800);
+
+    const checkedCount = await ev(panel, `document.querySelectorAll('.tree .chk.on').length`);
+    const partCount = await ev(panel, `document.querySelectorAll('.compose-parts .compose-part').length`);
+    check('⑪b 编辑时复现 3 个勾选标签', Number(checkedCount) === 3, `${checkedCount} 个`);
+    check('⑪b 组合区复现 3 段', Number(partCount) === 3, `${partCount} 段`);
+
+    const curView = await ev(panel, `(() => {
+        const box = document.querySelector('.tree');
+        const row = box?.querySelector('.row.current');
+        if (!box || !row) return 'none';
+        const rb = row.getBoundingClientRect();
+        const tb = box.getBoundingClientRect();
+        return JSON.stringify({
+            visible: rb.top >= tb.top - 1 && rb.bottom <= tb.bottom + 1,
+            bg: getComputedStyle(row).backgroundColor,
+        });
+    })()`);
+    console.log('   · 编辑时当前行:', curView);
+    {
+        const v = JSON.parse(curView);
+        check('⑪b 选中的标签滚进了可视范围', v.visible === true, curView);
+        check('⑪b 选中行有明显背景高亮', v.bg && v.bg !== 'rgba(0, 0, 0, 0)', v.bg);
+    }
+
+    // 退出编辑，交给 ⑫ 继续
+    await ev(panel, `(() => { document.querySelector('.foot.three .ghost')?.click(); return true; })()`);
+    await sleep(800);
 
     // ═══════════ ⑫ 组合规则 + 文字约束（同类里靠文字区分） ═══════════
     // 先把 ⑪ 留下的选择模式退掉，否则 .primary 是「拦截这个」

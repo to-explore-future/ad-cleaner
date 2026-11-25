@@ -1081,6 +1081,85 @@ async function importRulesFile(panel, filePath) {
     check('⑯ 勾选行底色 ≠ 普通行底色', colors.checked !== colors.plain, `${colors.checked} vs ${colors.plain}`);
     check('⑯ 复选框是绿色', /rgb\(0, 180, 42\)/.test(colors.checkbox), colors.checkbox);
 
+    // ═══════════ ⑰ 展开/收起节点，列表不许自己滚动 ═══════════
+    // 先把面板压矮，让树能滚
+    await panel.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 520, deviceScaleFactor: 1, mobile: false });
+    await sleep(700);
+    await ev(panel, `(() => { const c = document.querySelector('.tree'); if (c) c.scrollTop = 120; return true; })()`);
+    await sleep(400);
+    const before17 = await ev(panel, `document.querySelector('.tree')?.scrollTop ?? -1`);
+
+    // 点一个可展开的节点（不是当前行）
+    // 挑一个"在视野下方且当前是收起的"节点来展开（展开只会加内容，不会让滚动位置被夹）
+    const toggled = await ev(panel, `(() => {
+        const c = document.querySelector('.tree');
+        if (!c) return false;
+        const cb = c.getBoundingClientRect();
+        const rows = [...c.querySelectorAll('.row')];
+        const r = rows.find((x) => {
+            const a = x.querySelector('.arrow');
+            if (!a || a.classList.contains('empty')) return false;
+            if (!/▸/.test(a.textContent || '')) return false;   // 必须当前是收起的
+            return x.getBoundingClientRect().top > cb.bottom - 10;
+        });
+        if (!r) return false;
+        r.querySelector('.arrow').click();
+        return true;
+    })()`);
+    check('⑰ 找到一个可展开的节点并点开', toggled === true);
+    await sleep(1600);
+
+    const after17 = await ev(panel, `document.querySelector('.tree')?.scrollTop ?? -1`);
+    console.log('   · scrollTop:', before17, '→', after17);
+    check('⑰ 展开节点后列表滚动位置不变', Math.abs(Number(after17) - Number(before17)) <= 2, `${before17} → ${after17}`);
+    await panel.send('Emulation.clearDeviceMetricsOverride');
+    await sleep(400);
+
+    // ═══════════ ⑱ 只有"选中的元素变了"才居中 ═══════════
+    await panel.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 520, deviceScaleFactor: 1, mobile: false });
+    await sleep(600);
+    // 先选中别的地方，保证"选中的元素变了"，否则路径没变监听不触发
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(400);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 150, y: 150, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 150, y: 150, button: 'left', clickCount: 1 });
+    await sleep(900);
+
+    const deepPos = JSON.parse(await ev(page, `(() => {
+        const el = document.querySelector('.deep-leaf');
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+    })()`));
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: deepPos.x, y: deepPos.y, button: 'none' });
+    await sleep(500);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: deepPos.x, y: deepPos.y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: deepPos.x, y: deepPos.y, button: 'left', clickCount: 1 });
+    await sleep(2000);
+    const centered18 = JSON.parse(await ev(panel, `(() => {
+        const c = document.querySelector('.tree');
+        const r = c && c.querySelector('.row.current');
+        if (!c || !r) return JSON.stringify({ ok: false });
+        const cr = c.getBoundingClientRect();
+        const rr = r.getBoundingClientRect();
+        return JSON.stringify({
+            ok: true,
+            scrollTop: Math.round(c.scrollTop),
+            maxScroll: Math.round(c.scrollHeight - c.clientHeight),
+            rowCenter: Math.round(rr.top + rr.height / 2 - cr.top),
+            boxCenter: Math.round(c.clientHeight / 2),
+        });
+    })()`));
+    console.log('   · 选中后:', JSON.stringify(centered18));
+    await panel.send('Emulation.clearDeviceMetricsOverride');
+    if (centered18.ok) {
+        const nearEdge = centered18.scrollTop <= 1 || Math.abs(centered18.scrollTop - centered18.maxScroll) <= 40;
+        check('⑱ 选中元素后会主动滚到中间（或到边界）',
+            nearEdge || Math.abs(centered18.rowCenter - centered18.boxCenter) <= 60,
+            JSON.stringify(centered18));
+    } else {
+        check('⑱ 选中元素后会主动滚到中间（或到边界）', false, '没有当前行');
+    }
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

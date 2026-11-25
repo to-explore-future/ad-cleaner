@@ -566,6 +566,18 @@ async function composeRule(): Promise<void> {
 
 /** 展开 / 收起树节点 */
 function togglePath(path: string): void {
+    /**
+     * 记住滚动位置，展开/收起后原样恢复，列表不许跳。
+     * 用定时器补几次：树的更新是异步消息驱动的，一次 nextTick 往往还没到位。
+     */
+    const y = treeEl.value?.scrollTop ?? 0;
+    preserveScroll.value = y;
+    preserveUntil = Date.now() + 1200;
+    for (const d of [40, 120, 260, 500]) {
+        window.setTimeout(() => {
+            if (treeEl.value && Math.abs(treeEl.value.scrollTop - y) > 1) treeEl.value.scrollTop = y;
+        }, d);
+    }
     markTreeUpdate();
     void sendToTab({ type: 'adc:togglePath', path });
 }
@@ -797,10 +809,19 @@ watch(currentRowPath, async () => {
     centerCurrentRow();
 });
 
-// 树刚长出来时（第一次进选择模式）也要居中
+/**
+ * ⚠️ 树变化**不自动滚动**。
+ *    展开/收起节点也会让树变化，之前这里跟了居中逻辑，结果一点展开列表就跳。
+ *    规则：只有"选中的元素换了"才居中；展开/收起保持用户当前滚动位置。
+ */
+const preserveScroll = ref<number | null>(null);
+/** 在这个时间点之前，每次树更新都把滚动位置摆回去（一次不够，消息可能分几次到） */
+let preserveUntil = 0;
+
 watch(tree, async () => {
+    if (preserveScroll.value == null || Date.now() > preserveUntil) return;
     await nextTick();
-    centerCurrentRow();
+    if (treeEl.value) treeEl.value.scrollTop = preserveScroll.value;
 });
 
 // 树重新渲染（展开/换目标）后，只保证当前行在视野内，避免来回跳

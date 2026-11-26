@@ -1481,7 +1481,9 @@ async function importRulesFile(panel, filePath) {
 
     const rowText22 = await ev(panel, `document.querySelector('.rule')?.innerText.replace(/\\s+/g,' ').trim() ?? ''`);
     check('㉒ 列表标题显示名字', /首页大广告框/.test(rowText22), rowText22);
-    check('㉒ 列表显示 UID 短码', rowText22.includes('#' + (nameSaved[0]?.uid || '').slice(-8)), rowText22);
+    check('㉒ 列表不显示 UID（UID 只给后台/分享用）',
+        !rowText22.includes((nameSaved[0]?.uid || '').slice(-8)) && (await ev(panel, `document.querySelectorAll('.uid-chip').length`)) === 0,
+        rowText22);
     check('㉒ 列表仍显示自动描述', /div\.ad-box/.test(rowText22), rowText22);
 
     // 点名字 → 内联改名
@@ -1504,13 +1506,39 @@ async function importRulesFile(panel, filePath) {
     check('㉒ 改名写回存储', renamed22.name === '首页顶部广告', renamed22.name);
     check('㉒ 改名不换 UID', renamed22.uid === nameSaved[0]?.uid, `${renamed22.uid} vs ${nameSaved[0]?.uid}`);
 
-    // 编辑时名字回填 + 显示 UID
+    // 编辑时名字回填；顶栏一行；名字输入框占满整行、不再有「名」占位块
     await ev(panel, `document.querySelector('.rule .icon[title="编辑"]')?.click()`);
     await sleep(2600);
     const editNameVal = await ev(panel, `document.querySelector('.compose-name-input')?.value ?? ''`);
-    const editUidText = await ev(panel, `document.querySelector('.compose-uid')?.textContent ?? ''`);
     check('㉒ 编辑时名字回填', editNameVal === '首页顶部广告', editNameVal);
-    check('㉒ 编辑时显示 UID 短码', editUidText.includes((renamed22.uid || '').slice(-8)), editUidText);
+
+    const headGeom = JSON.parse(await ev(panel, `(() => {
+        const h = document.querySelector('.pick-head');
+        const t = document.querySelector('.pick-title');
+        const x = document.querySelector('.pick-hint');
+        const mid = (e) => { const r = e.getBoundingClientRect(); return Math.round(r.top + r.height / 2); };
+        return JSON.stringify({
+            height: Math.round(h.getBoundingClientRect().height),
+            titleMid: mid(t),
+            hintMid: mid(x),
+        });
+    })()`));
+    check('㉒ 「修改规则」顶栏只有一行', headGeom.height <= 48 && Math.abs(headGeom.titleMid - headGeom.hintMid) <= 2, JSON.stringify(headGeom));
+
+    const nameGeom = JSON.parse(await ev(panel, `(() => {
+        const c = document.querySelector('.compose');
+        const i = document.querySelector('.compose-name-input');
+        return JSON.stringify({
+            composeW: Math.round(c.getBoundingClientRect().width),
+            inputW: Math.round(i.getBoundingClientRect().width),
+            extra: !!document.querySelector('.compose-name, .compose-uid, .cond-badge.name'),
+            inputRows: Math.round(i.getBoundingClientRect().height),
+        });
+    })()`));
+    check('㉒ 名字输入框占满一行、左侧没有「名」占位块',
+        nameGeom.extra === false && nameGeom.inputW >= nameGeom.composeW * 0.82,
+        JSON.stringify(nameGeom));
+
     await cancelPick(panel);
     await sleep(800);
 
@@ -1544,6 +1572,20 @@ async function importRulesFile(panel, filePath) {
         return JSON.stringify((g.blockRules['127.0.0.1'] || []).map((r) => r.uid ?? ''));
     })()`)) || []).join('|');
     check('㉓ UID 补完以后保持稳定', uidAfter === uidBefore, `${uidBefore} → ${uidAfter}`);
+    await sleep(900);
+
+    const compactList = JSON.parse(await ev(panel, `JSON.stringify({
+        rows: document.querySelectorAll('.rule').length,
+        metas: document.querySelectorAll('.rule .rule-meta').length,
+        uids: document.querySelectorAll('.uid-chip').length,
+        heights: [...document.querySelectorAll('.rule')].map((r) => Math.round(r.getBoundingClientRect().height)),
+        text: document.querySelector('.rule')?.innerText.replace(/\\s+/g, ' ').trim() ?? '',
+    })`));
+    console.log('   · 规则行紧凑度:', JSON.stringify(compactList));
+    check('㉓ 列表里不出现 UID', compactList.uids === 0, JSON.stringify(compactList));
+    check('㉓ 没起名字的规则不占第二行',
+        compactList.rows === 2 && compactList.metas === 0 && compactList.heights.every((h) => h <= 50),
+        JSON.stringify(compactList));
 
     // 导入一条带 name + uid 的分享规则
     const shareFile = path.join(os.tmpdir(), 'adc-share-rule.json');

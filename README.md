@@ -7,7 +7,8 @@ Chrome / Edge 扩展。像 F12 一样在网页上点选元素，**沿完整 DOM 
 
 - 官网（安装包下载 + 各浏览器安装方式）：**https://tianrunye.com/adcleaner**
 - 最新版本：**v0.3.4**
-- 下载：见 [Releases](../../releases) 或官网的「下载 ZIP」
+- 下载：[Releases v0.3.4](https://github.com/to-explore-future/ad-cleaner/releases/tag/v0.3.4)
+  或官网的「下载 ZIP」（**https://tianrunye.com/downloads/adcleaner-0.3.4.zip**）
 
 ---
 
@@ -35,7 +36,7 @@ Chrome / Edge 扩展。像 F12 一样在网页上点选元素，**沿完整 DOM 
 
 商店上架前用 ZIP 安装（四步，一分钟）：
 
-1. 从 [官网](https://tianrunye.com/adcleaner) 或 [Releases](../../releases) 下载 ZIP，解压到固定文件夹
+1. 从 [官网](https://tianrunye.com/adcleaner) 或 [Releases](https://github.com/to-explore-future/ad-cleaner/releases/latest) 下载 ZIP，解压到固定文件夹
    （解压后应能直接看到 `manifest.json`）
 2. 浏览器地址栏输入 `chrome://extensions`（Edge 是 `edge://extensions`）
 3. 打开右上角「开发者模式」

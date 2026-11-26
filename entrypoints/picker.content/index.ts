@@ -1342,7 +1342,7 @@ async function boot(ctx: { setInterval: (fn: () => void, ms: number) => unknown 
                         if (!picking) startPicker();
                         selectionOrigin = 'panel';
                         setSelected(el);
-                        sendResponse({ ok: true });
+                        sendResponse({ ok: true, path: currentPathKey });
                     } else {
                         sendResponse({ ok: false, reason: 'not-found' });
                     }

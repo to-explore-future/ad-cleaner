@@ -774,14 +774,14 @@ async function importRulesFile(panel, filePath) {
         r.querySelector('.name').click();
         return true;
     })()`);
-    check('⑪ 能在树里选中锚点 ad-box', anchorPicked === true);
+    check('⑪ 能在树里定位到 ad-box', anchorPicked === true);
     await sleep(700);
 
-    // 勾选锚点内部的两层：ad-wrap → ad-inner
+    // 勾上锚点 ad-box（绿色复选框才参与规则）+ 它内部的两层：ad-wrap → ad-inner
     const picked = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
         let n = 0;
-        for (const key of ['ad-wrap', 'ad-inner']) {
+        for (const key of ['ad-box', 'ad-wrap', 'ad-inner']) {
             const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes(key));
             if (!r) continue;
             r.querySelector('.chk').click();
@@ -789,9 +789,11 @@ async function importRulesFile(panel, filePath) {
         }
         return n;
     })()`);
-    check('⑪ 能勾锚点内部的两层', Number(picked) === 2, `${picked} 层`);
+    check('⑪ 能勾上锚点和内部的两层', Number(picked) === 3, `${picked} 层`);
     await sleep(900);
 
+    const composeAnchor11 = await ev(panel, `document.querySelector('.compose-anchor .compose-sel')?.textContent ?? ''`);
+    check('⑪ 锚点取最外层勾选（ad-box），不是蓝色定位行以外的层级', /ad-box/.test(composeAnchor11), composeAnchor11);
     const condRows = await ev(panel, `[...document.querySelectorAll('.compose-part .compose-sel')].map(e => e.innerText)`);
     check('⑪ 条件区列出两段', condRows.length === 2, JSON.stringify(condRows));
 
@@ -863,7 +865,7 @@ async function importRulesFile(panel, filePath) {
     console.log('   · 编辑复现:', JSON.stringify(editState));
     check('⑪b 锚点复现为 ad-box', /ad-box/.test(editState.anchor), editState.anchor);
     check('⑪b 严格开关复现为开', editState.strict === true, String(editState.strict));
-    check('⑪b 复现 2 个勾选条件（锚点本身不勾）', editState.checks === 2, `${editState.checks} 个`);
+    check('⑪b 复现勾选（锚点 + 2 个条件）', editState.checks === 3, `${editState.checks} 个`);
     check('⑪b 条件区复现 2 段', editState.rows.length === 2, JSON.stringify(editState.rows));
     check('⑪b 层级输入复现为 1 / 1', editState.depths.every((v) => v === '1') && editState.depths.length === 2, JSON.stringify(editState.depths));
     check('⑪b 选中的标签滚进了可视范围', editState.visible === true, String(editState.visible));
@@ -886,6 +888,7 @@ async function importRulesFile(panel, filePath) {
         const rows = [...document.querySelectorAll('.tree .row')];
         const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
         r?.querySelector('.name')?.click();
+        r?.querySelector('.chk')?.click();
         return !!r;
     })()`);
     await sleep(700);
@@ -935,23 +938,28 @@ async function importRulesFile(panel, filePath) {
     await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: ft.x, y: ft.y, button: 'none' });
     await sleep(900);
 
-    // 锚点 = feed-item；勾选它内部的 feed-cover 作为条件
-    await ev(panel, `(() => {
-        const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('feed-item'));
-        r?.querySelector('.name')?.click();
-        return !!r;
-    })()`);
-    await sleep(700);
+    // 还原真实场景：蓝色定位行在更深的 feed-title，真正参与规则的是勾选的 feed-item → feed-cover
+    // （以前拿蓝色行当锚点，会误报"勾选的标签必须在锚点内部"）
     const picked2 = await ev(panel, `(() => {
         const rows = [...document.querySelectorAll('.tree .row')];
-        const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes('feed-cover'));
-        if (!r) return false;
-        r.querySelector('.chk').click();
-        return true;
+        let n = 0;
+        for (const key of ['feed-item', 'feed-cover']) {
+            const r = rows.find((x) => (x.querySelector('.name')?.textContent ?? '').includes(key));
+            if (!r) continue;
+            r.querySelector('.chk').click();
+            n++;
+        }
+        return n;
     })()`);
-    check('⑫ 勾选 feed-cover 作为条件', picked2 === true);
-    await sleep(700);
+    check('⑫ 勾选 feed-item（锚点）和 feed-cover（条件）', Number(picked2) === 2, `${picked2} 个`);
+    await sleep(900);
+
+    const anchor12 = await ev(panel, `document.querySelector('.compose-anchor .compose-sel')?.textContent ?? ''`);
+    const err12 = await ev(panel, `document.querySelector('.compose-err')?.textContent ?? ''`);
+    const selRow12 = await infoVal(panel, '选择器');
+    check('⑫ 锚点取最外层勾选 feed-item（不参考蓝色定位行）', /feed-item/.test(anchor12), anchor12);
+    check('⑫ 不再误报"勾选在锚点内部/外面"红字', err12 === '', err12 || '(无)');
+    check('⑫ 选择器摘要显示锚点选择器', /feed-item/.test(selRow12), selRow12);
 
     // 树里显示节点的文字内容
     const nodeTextShown = await ev(panel, `[...document.querySelectorAll('.tree .txt')].length > 0`);
@@ -1032,8 +1040,44 @@ async function importRulesFile(panel, filePath) {
     check('⑫b 锚点复现为 feed-item', /feed-item/.test(state12.anchor), state12.anchor);
     check('⑫b 条件文字「广告」复现', state12.texts.includes('广告'), JSON.stringify(state12.texts));
     check('⑫b 严格开关复现为开', state12.strict === true, String(state12.strict));
-    check('⑫b 勾选的 feed-cover 复现', state12.checks === 1, `${state12.checks} 个`);
+    check('⑫b 勾选复现（锚点 + feed-cover）', state12.checks === 2, `${state12.checks} 个`);
     check('⑫b 层级复现为 1', state12.depths.every((v) => v === '1') && state12.depths.length === 1, JSON.stringify(state12.depths));
+
+    // ═══════════ ⑫c 点条件区里的选择器 → 树把该节点滚到正中 ═══════════
+    await panel.send('Emulation.setDeviceMetricsOverride', { width: 420, height: 520, deviceScaleFactor: 1, mobile: false });
+    await sleep(500);
+    await ev(panel, `(() => { const c = document.querySelector('.tree'); if (c) c.scrollTop = 0; return true; })()`);
+    await sleep(300);
+    const locateClicked = await ev(panel, `(() => {
+        const b = [...document.querySelectorAll('.compose-anchor .compose-pick')].find((x) => x.textContent.trim() === '定位');
+        if (!b) return false;
+        b.click();
+        return true;
+    })()`);
+    await sleep(500);
+    const locatePos = JSON.parse(await ev(panel, `(() => {
+        const c = document.querySelector('.tree');
+        const row = c?.querySelector('.row.current');
+        if (!c || !row) return JSON.stringify({ ok: false });
+        const cr = c.getBoundingClientRect();
+        const rr = row.getBoundingClientRect();
+        return JSON.stringify({
+            ok: true,
+            scrollTop: Math.round(c.scrollTop),
+            maxScroll: Math.round(c.scrollHeight - c.clientHeight),
+            rowCenter: Math.round(rr.top + rr.height / 2 - cr.top),
+            boxCenter: Math.round(c.clientHeight / 2),
+        });
+    })()`));
+    console.log('   · ⑫c 定位后:', JSON.stringify(locatePos));
+    {
+        const nearEdge = locatePos.ok && (locatePos.scrollTop <= 1 || Math.abs(locatePos.scrollTop - locatePos.maxScroll) <= 40);
+        check('⑫c 点「定位」能把节点滚到树正中（或到边界）',
+            locateClicked === true && locatePos.ok && (nearEdge || Math.abs(locatePos.rowCenter - locatePos.boxCenter) <= 60),
+            JSON.stringify(locatePos));
+    }
+    await panel.send('Emulation.clearDeviceMetricsOverride');
+    await sleep(400);
     await cancelPick(panel);
     await sleep(800);
 

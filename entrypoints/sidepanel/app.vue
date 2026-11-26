@@ -491,6 +491,7 @@ async function startPick(): Promise<void> {
     matchCount.value = 0;
     clearComposition();
     editRootSelector.value = '';
+    editAnchorPath.value = '';
     // 新一次选择：重新记基线，别把上一次的页面点选当成新的
     centerToken++;
 }
@@ -514,9 +515,10 @@ async function startEdit(rule: BlockRule): Promise<void> {
     // 重新编辑时先清空上一次的条件；编辑是右侧操作，不居中
     clearComposition();
     editRootSelector.value = rule.selector;
+    editAnchorPath.value = '';
     centerToken++;
 
-    const res = await sendToTabOrInject<{ ok: boolean }>({
+    const res = await sendToTabOrInject<{ ok: boolean; path?: string }>({
         type: 'adc:selectBySelector',
         selector: rule.selector,
         pattern: rule.pattern,
@@ -526,6 +528,7 @@ async function startEdit(rule: BlockRule): Promise<void> {
         showToast('页面上已找不到这条规则的目标，请重新选一个');
         return;
     }
+    editAnchorPath.value = res.path ?? '';
 
     const pattern = rule.pattern;
     if (!pattern || (!pattern.text && !(pattern.children && pattern.children.length))) return;
@@ -546,8 +549,10 @@ async function startEdit(rule: BlockRule): Promise<void> {
     }
 
     const children = patternChildren(pattern);
+    // ⚠️ 根节点也要勾上：锚点 = 勾选里最外层那一行；不勾根的话编辑时会被当成"没有锚点"
+    editAnchorPath.value = pp.entries[0].path;
+    checkedPaths.value = new Set(pp.entries.map((e) => e.path));
     const entries = pp.entries.slice(1);
-    checkedPaths.value = new Set(entries.map((e) => e.path));
     const texts: Record<string, string> = {};
     const depths: Record<string, number> = {};
     entries.forEach((e, i) => {
@@ -620,9 +625,30 @@ function shortSelector(n: { tag: string; id: string; classes: string[] }): strin
 
 // ───────────────────────── 统一规则：锚点 + 条件树 ─────────────────────────
 
-/** 锚点 = 页面上点中的那一行（蓝色 current） */
-const anchorNode = computed<TreeRow | null>(() => tree.value.find((n) => n.current) ?? null);
+/** 页面/面板当前定位到的行（蓝色）。⚠️ 它只是"导航位置"，不等于规则锚点 */
+const currentRow = computed<TreeRow | null>(() => tree.value.find((n) => n.current) ?? null);
+
+/**
+ * 规则锚点：**勾选（绿色复选框）里最外层的那一行**。
+ *
+ * 用户明确要求：蓝色只是"UI 定位到附近"，绿色才是真正参与规则的标签。
+ * 之前拿蓝色行当锚点，用户勾了 feed-card 作为锚点、只是在树里定位到更深的 wrap，
+ * 就被判成"勾选在锚点外面"并报红字。
+ *
+ * 一个都没勾 → 退回当前定位行，保留"直接在锚点行填文字"的懒人模式。
+ */
+const anchorNode = computed<TreeRow | null>(() => {
+    const checked = checkedNodes.value;
+    if (checked.length) {
+        let best = checked[0];
+        for (const n of checked) if (n.depth < best.depth) best = n;
+        return best;
+    }
+    return currentRow.value;
+});
 const anchorPath = computed(() => anchorNode.value?.path ?? '');
+/** 锚点是不是当前蓝色定位行（决定根选择器要不要复用页面实测的 finalSelector） */
+const anchorIsCurrent = computed(() => !!anchorNode.value && anchorNode.value.path === (currentRow.value?.path ?? ''));
 
 /** 这个路径是不是在锚点内部 */
 function insideAnchor(path: string): boolean {
@@ -718,8 +744,8 @@ const compositionSummary = computed(() => {
 
 /** 校验：锚点必须有；条件必须在锚点内部；严格模式下层级必须合法 */
 const composeError = computed(() => {
-    if (!anchorNode.value) return '先在页面上选中要拦的元素';
-    if (outsideChecks.value.length > 0) return '勾选的标签必须在锚点内部；外面那几行请取消勾选';
+    if (!anchorNode.value) return '先勾选要拦的那一层，或在页面上点选一个元素';
+    if (outsideChecks.value.length > 0) return '有勾选的标签不在锚点内部；请检查是否勾了别的分支';
     if (strictMode.value) {
         for (const r of conditionRows.value) {
             if (!Number.isInteger(r.relDepth) || r.relDepth < 1) return '严格模式下每个条件都要填层级（≥1）';
@@ -785,9 +811,7 @@ watch(
 function buildPattern(): RulePattern | null {
     const a = anchorNode.value;
     if (!a) return null;
-    const rootSelector = editingId.value && editRootSelector.value && !scopeTouched.value
-        ? editRootSelector.value
-        : (finalSelector.value || shortSelector(a));
+    const rootSelector = draftRootSelector.value || shortSelector(a);
     const root: RulePattern = {
         selector: rootSelector,
         ...(anchorText.value.trim() ? { text: anchorText.value.trim() } : {}),
@@ -820,6 +844,18 @@ function buildPattern(): RulePattern | null {
 
 /** 编辑已有规则时，原始锚点选择器（避免保存时被重新生成的位置选择器改写） */
 const editRootSelector = ref('');
+/** 编辑的规则原来锚点对应的树路径（用来判断用户有没有把锚点换掉） */
+const editAnchorPath = ref('');
+
+/** 草稿的根选择器：编辑保留原选择器；勾选的锚点用简写；懒人模式用页面实测的选择器 */
+const draftRootSelector = computed(() => {
+    const a = anchorNode.value;
+    if (!a) return '';
+    const keepEditedRoot = !!editingId.value && !!editRootSelector.value && !scopeTouched.value
+        && a.path === editAnchorPath.value;
+    if (keepEditedRoot) return editRootSelector.value;
+    return anchorIsCurrent.value ? (finalSelector.value || shortSelector(a)) : shortSelector(a);
+});
 
 function clearComposition(): void {
     checkedPaths.value = new Set();
@@ -1129,12 +1165,10 @@ function stopPolling(): void {
     }
 }
 
-/** 把当前行滚到列表的**正中**（不是只让它露出来） */
-function centerCurrentRow(): void {
+/** 把某一行滚到列表的**正中**（不是只让它露出来） */
+function centerRowInTree(row: HTMLElement): void {
     const c = treeEl.value;
     if (!c) return;
-    const row = c.querySelector('.row.current') as HTMLElement | null;
-    if (!row) return;
     const cr = c.getBoundingClientRect();
     const rr = row.getBoundingClientRect();
     // 目标：行中心 == 容器中心
@@ -1142,6 +1176,33 @@ function centerCurrentRow(): void {
     if (Math.abs(delta) < 4) return;
     // 用即时滚动：smooth 在 CDP 的 deviceMetrics 模拟下经常不生效
     c.scrollTop = c.scrollTop + delta;
+}
+
+/** 把当前行滚到列表的**正中** */
+function centerCurrentRow(): void {
+    const c = treeEl.value;
+    if (!c) return;
+    const row = c.querySelector('.row.current') as HTMLElement | null;
+    if (!row) return;
+    centerRowInTree(row);
+}
+
+/**
+ * 点条件区里的选择器 → 把对应节点滚到树的正中。
+ *
+ * 标签太多时用户翻上翻下容易迷路；这里只滚动，不改变选中/勾选。
+ * 手动加的条件没有树节点（path 以 manual: 开头），忽略。
+ */
+function locateInTree(path: string): void {
+    if (!path || path.startsWith('manual:')) return;
+    const c = treeEl.value;
+    if (!c) return;
+    const row = [...c.querySelectorAll<HTMLElement>('.row')].find((r) => r.dataset.path === path);
+    if (!row) {
+        showToast('这个标签在树里被折叠了，先展开它的上级');
+        return;
+    }
+    centerRowInTree(row);
 }
 
 /**
@@ -1454,7 +1515,7 @@ onUnmounted(() => {
             <div class="pick-info">
                 <div class="info-row">
                     <span class="k">选择器</span>
-                    <span class="v">{{ finalSelector || '—' }}</span>
+                    <span class="v">{{ (hasComposition ? draftRootSelector : finalSelector) || '—' }}</span>
                 </div>
                 <!-- 条件摘要：锚点文字 / 勾选的条件 / 手动加的条件 -->
                 <div class="info-row">
@@ -1544,7 +1605,13 @@ onUnmounted(() => {
                     <div class="compose-anchor">
                         <div class="compose-head">
                             <span class="cond-badge anchor">锚</span>
-                            <span class="compose-sel">{{ finalSelector || (anchorNode ? shortSelector(anchorNode) : '—') }}</span>
+                            <button
+                                type="button"
+                                class="compose-sel"
+                                title="在树里定位这个标签"
+                                @click="locateInTree(anchorPath)"
+                            >{{ draftRootSelector || (anchorNode ? shortSelector(anchorNode) : '—') }}</button>
+                            <button class="compose-pick" title="在树里定位这个标签" @click="locateInTree(anchorPath)">定位</button>
                             <button class="compose-pick" @click="useAnchorSelection">选中的字</button>
                         </div>
                         <input
@@ -1565,11 +1632,17 @@ onUnmounted(() => {
                             v-for="row in conditionRows"
                             :key="row.path"
                             class="compose-part"
-                            :style="{ paddingLeft: Math.max(0, row.node.depth - (anchorNode?.depth ?? 0) - 1) * 10 + 'px' }"
+                            :style="{ paddingLeft: Math.min(48, Math.max(0, row.node.depth - (anchorNode?.depth ?? 0) - 1) * 10) + 'px' }"
                         >
                             <div class="compose-head">
                                 <span class="cond-badge">条件</span>
-                                <span class="compose-sel">{{ row.selector }}</span>
+                                <button
+                                    type="button"
+                                    class="compose-sel"
+                                    title="在树里定位这个标签"
+                                    @click="locateInTree(row.path)"
+                                >{{ row.selector }}</button>
+                                <button class="compose-pick" title="在树里定位这个标签" @click="locateInTree(row.path)">定位</button>
                                 <button class="compose-pick" @click="useSelection(row.path)">选中的字</button>
                             </div>
                             <div class="compose-sub">
@@ -1595,7 +1668,7 @@ onUnmounted(() => {
                         <div v-for="(row, i) in manualRows" :key="row.path" class="compose-part">
                             <div class="compose-head">
                                 <span class="cond-badge">条件</span>
-                                <span class="compose-sel">{{ row.selector }}</span>
+                                <span class="compose-sel static">{{ row.selector }}</span>
                                 <button class="compose-pick" @click="removeManual(i)">删除</button>
                             </div>
                             <div class="compose-sub">
@@ -1621,7 +1694,7 @@ onUnmounted(() => {
                     </div>
 
                     <div v-if="!hasComposition" class="compose-hint">
-                        在树里勾选锚点内部的标签 = 加一条条件；也可以直接在锚点这一行填文字。
+                        勾选要拦的那一层（最外层勾选 = 锚点），再勾它内部的标签 = 条件；也可以不勾，直接在锚点这一行填文字。
                     </div>
 
                     <div v-if="composeError" class="compose-err">{{ composeError }}</div>
@@ -2188,13 +2261,23 @@ onUnmounted(() => {
 .compose-sel {
     flex: 1;
     min-width: 0;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    text-align: left;
     font-family: ui-monospace, Menlo, monospace;
     font-size: 11px;
     color: #1f2329;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    cursor: pointer;
+    border-radius: 3px;
 }
+.compose-sel:hover { color: #00aeec; text-decoration: underline; }
+.compose-sel:focus-visible { outline: 1px solid #00aeec; outline-offset: 1px; }
+.compose-sel.static { cursor: default; }
+.compose-sel.static:hover { color: #1f2329; text-decoration: none; }
 .compose-text {
     flex: 1;
     width: 100%;

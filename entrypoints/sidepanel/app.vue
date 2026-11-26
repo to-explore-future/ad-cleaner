@@ -272,6 +272,7 @@ async function loadPage(): Promise<void> {
         await ensureRuleUids();
         rules.value = canWork.value ? (await loadRulesFor(domain.value)).map(normalizeRule) : [];
         await refreshCounts();
+        lastLoadAt = Date.now();
     } catch (e) {
         console.warn('[广告拦截助手] 读取当前页面失败', e);
     }
@@ -1313,6 +1314,9 @@ function onRuntimeMessage(msg: unknown): void {
         if (condCandidates.value.length === 0) {
             showToast('这个位置没找到能区分的东西，换个地方点（比如广告角标上的字）');
         }
+    } else if (m?.type === 'adc:pageSettled') {
+        // 页面 DOM 停下来了（滚动加载、单页应用重渲染）→ 只重算命中数
+        scheduleCountRefresh(350);
     } else if (m?.type === 'adc:pickerEnded') {
         picking.value = false;
         editingId.value = null;
@@ -1321,26 +1325,75 @@ function onRuntimeMessage(msg: unknown): void {
     }
 }
 
-function onTabChanged(): void {
-    void loadPage();
+// ───────────────────────── 刷新节流 ─────────────────────────
+
+/**
+ * 以前每 2s 无条件 loadPage()：页面不动也在读存储、问命中数。
+ * 现在只在真正可能变化时刷新：切标签页、页面加载完、存储变了、面板重新可见、页面 DOM 稳定。
+ */
+let pageLoadTimer: number | null = null;
+let countRefreshTimer: number | null = null;
+let lastLoadAt = 0;
+
+function scheduleLoadPage(delay = 250): void {
+    if (pageLoadTimer != null) window.clearTimeout(pageLoadTimer);
+    pageLoadTimer = window.setTimeout(() => {
+        pageLoadTimer = null;
+        void loadPage();
+    }, delay);
 }
 
-let pollTimer: number | null = null;
+function scheduleCountRefresh(delay = 300): void {
+    if (countRefreshTimer != null) window.clearTimeout(countRefreshTimer);
+    countRefreshTimer = window.setTimeout(() => {
+        countRefreshTimer = null;
+        if (picking.value || document.hidden) return;
+        void refreshCounts();
+    }, delay);
+}
+
+function onTabActivated(): void {
+    scheduleLoadPage(150);
+}
+
+function onTabUpdated(id: number, change: chrome.tabs.OnUpdatedInfo): void {
+    // 只关心当前这个页面，别让后台标签页的更新把我们带着刷新
+    if (tabId.value != null && id !== tabId.value) return;
+    if (change.status !== 'complete' && change.url == null) return;
+    scheduleLoadPage(300);
+}
+
+function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>, area: string): void {
+    if (area !== 'local') return;
+    if ('settings' in changes) void loadSettings().then((v) => { settings.value = v; });
+    if ('blockRules' in changes) scheduleLoadPage(180);
+}
+
+function onPanelVisible(): void {
+    if (document.hidden) return;
+    if (Date.now() - lastLoadAt < 1500) return;
+    scheduleLoadPage(100);
+}
 
 onMounted(() => {
     void loadPage();
     chrome.runtime.onMessage.addListener(onRuntimeMessage);
-    chrome.tabs.onActivated.addListener(onTabChanged);
-    chrome.tabs.onUpdated.addListener(onTabChanged);
-    // 侧边栏在切换标签页时不一定收到事件，兜一个低频轮询
-    pollTimer = window.setInterval(() => { void loadPage(); }, 2000);
+    chrome.tabs.onActivated.addListener(onTabActivated);
+    chrome.tabs.onUpdated.addListener(onTabUpdated);
+    chrome.storage.onChanged.addListener(onStorageChanged);
+    document.addEventListener('visibilitychange', onPanelVisible);
+    window.addEventListener('focus', onPanelVisible);
 });
 
 onUnmounted(() => {
     chrome.runtime.onMessage.removeListener(onRuntimeMessage);
-    chrome.tabs.onActivated.removeListener(onTabChanged);
-    chrome.tabs.onUpdated.removeListener(onTabChanged);
-    if (pollTimer != null) window.clearInterval(pollTimer);
+    chrome.tabs.onActivated.removeListener(onTabActivated);
+    chrome.tabs.onUpdated.removeListener(onTabUpdated);
+    chrome.storage.onChanged.removeListener(onStorageChanged);
+    document.removeEventListener('visibilitychange', onPanelVisible);
+    window.removeEventListener('focus', onPanelVisible);
+    if (pageLoadTimer != null) window.clearTimeout(pageLoadTimer);
+    if (countRefreshTimer != null) window.clearTimeout(countRefreshTimer);
     stopPolling();
     if (toastTimer != null) window.clearTimeout(toastTimer);
 });

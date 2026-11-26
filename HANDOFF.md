@@ -21,7 +21,7 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压 → 选
 
 ```bash
 node scripts/server.cjs &     # 本地测试页 :8941
-node scripts/verify-real.cjs  # 生产路径端到端，153 项
+node scripts/verify-real.cjs  # 生产路径端到端，158 项
 node scripts/verify.cjs       # 完整套件，25 项
 ```
 
@@ -47,7 +47,7 @@ scripts/fixture/index.html            测试页
 - 统一规则模型：锚点 + 条件树（锚点文字偷懒模式 / 勾选条件 / 严格层级 / 条件嵌套与文字）
 - 规则列表：本页/本网站筛选、开关、编辑、删除、命中数、导入导出
 - 面板可弹出成独立窗口（⧉）
-- 178 项自动化测试（153 + 25）
+- 183 项自动化测试（158 + 25）
 
 ## 已知问题（**未修完**）
 
@@ -90,6 +90,12 @@ scripts/fixture/index.html            测试页
 > 「修改规则」顶栏改成单行 flex（原来标题一行、按钮一行，占 67px）；
 > 名字只留一个全宽输入框（去掉「名」badge 和 UID）；
 > 无名字的规则不渲染第二行（自动描述本身已含选择器）。对应测试 ㉒ / ㉓。
+>
+> 0.3.4 已改：删掉面板每 2s 的 `loadPage` 轮询。现在只在切标签页、页面加载完成、
+> `chrome.storage` 规则/设置变化、面板重新可见/聚焦、页面 DOM 稳定时刷新。
+> 内容脚本 MutationObserver 在变化停止 1.2s 后发 `adc:pageSettled`（最快 3s 一次，
+> 冷却期内的变化会延后而不是丢弃）；面板只重算命中数，不读存储。
+> 对应测试 ㉔（空闲 5.2s 内 countRules 0 次；插节点后 3→4；存储新增规则自动出现）。
 
 ## 关键约定（改之前必读）
 

@@ -1644,6 +1644,81 @@ async function importRulesFile(panel, filePath) {
     } catch { /* 导出被下载策略拦住时，至少不误报 */ }
     check('㉓ 导出文件带 name / uid', exportedOk === true, String(exportedText).slice(0, 120));
 
+    // ═══════════ ㉔ 空闲不轮询：页面/存储真的变了才刷新 ═══════════
+    await cancelPick(panel);
+    await sleep(500);
+    await page.send('Page.reload');
+    await sleep(1800);
+    await ev(panel, `chrome.storage.local.set({ blockRules: { '127.0.0.1': [
+        { id: 'poll-1', domain: '127.0.0.1', selector: '.dup', action: 'hide', enabled: true, label: 'div.dup', uid: 'adc_polltest000000000001', createdAt: 1 }
+    ] } }).then(()=>'ok')`);
+    await panel.send('Page.reload');
+    await sleep(1800);
+    // 测试里面板是普通标签页，可能被页面抢了 active；后台标签的 document.hidden=true 会跳过刷新
+    const panelVisible = await ev(panel, `(async () => {
+        const t = await chrome.tabs.getCurrent();
+        if (t) await chrome.tabs.update(t.id, { active: true });
+        return !document.hidden;
+    })()`);
+    await sleep(900);
+    console.log('   · ㉔ 面板可见:', panelVisible);
+
+    const countOfDup = () => ev(panel, `[...document.querySelectorAll('.rule')].find((r) => /div\\.dup/.test(r.innerText))?.querySelector('.count')?.innerText ?? 'none'`);
+    const initialDup = await countOfDup();
+    check('㉔ 初始命中数 3', initialDup === '3', initialDup);
+
+    // 记录发往页面的 countRules 次数：空闲 5s 不许有轮询
+    await ev(panel, `(() => {
+        window.__countCalls = 0;
+        const orig = chrome.tabs.sendMessage.bind(chrome.tabs);
+        chrome.tabs.sendMessage = (...args) => {
+            const m = args[1];
+            if (m && m.type === 'adc:countRules') window.__countCalls++;
+            return orig(...args);
+        };
+        return true;
+    })()`);
+    await sleep(5200);
+    const idleCalls = await ev(panel, `window.__countCalls`);
+    check('㉔ 页面空闲时不轮询命中数', Number(idleCalls) <= 1, `${idleCalls} 次 / 5.2s`);
+
+    // 页面 DOM 真的变了（插入同款）→ 只刷新一次，命中数 3 → 4
+    const addedDup = await ev(page, `(() => {
+        const d = document.createElement('div');
+        d.className = 'dup z';
+        d.textContent = '同款 4';
+        document.querySelector('#content').appendChild(d);
+        return document.querySelectorAll('.dup').length;
+    })()`);
+    let dupAfter = '';
+    for (let i = 0; i < 24; i++) {
+        await sleep(400);
+        dupAfter = await countOfDup();
+        if (dupAfter === '4') break;
+    }
+    check('㉔ 页面新增内容后才刷新命中数（3 → 4）', dupAfter === '4', `${addedDup} 个 / 显示 ${dupAfter}`);
+
+    const callsAfterMutation = await ev(panel, `window.__countCalls`);
+    check('㉔ 一次页面变化只触发一次重算', Number(callsAfterMutation) <= 2, `${callsAfterMutation} 次`);
+
+    // 规则存储变化 → 列表自动更新（不靠轮询）
+    await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        g.blockRules['127.0.0.1'].push({
+            id: 'poll-2', domain: '127.0.0.1', selector: '.icon-box', action: 'hide',
+            enabled: true, label: 'div.icon-box', uid: 'adc_polltest000000000002', createdAt: 2,
+        });
+        await chrome.storage.local.set(g);
+        return 'ok';
+    })()`);
+    let ruleRows = 0;
+    for (let i = 0; i < 20; i++) {
+        await sleep(300);
+        ruleRows = await ev(panel, `document.querySelectorAll('.rule').length`);
+        if (ruleRows === 2) break;
+    }
+    check('㉔ 存储变化会自动刷新规则列表', ruleRows === 2, `${ruleRows} 条`);
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);

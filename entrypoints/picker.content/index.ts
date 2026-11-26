@@ -299,11 +299,37 @@ function applyAll(): void {
 let removeObserver: MutationObserver | null = null;
 let removeTimer: number | null = null;
 
+/**
+ * 页面 DOM 稳定后通知面板刷新命中数。
+ *
+ * ⚠️ 以前面板每 2s 轮询一次，页面明明不动也在读存储、问命中数 —— 纯浪费。
+ *    现在改成"页面真的变了"才通知：DOM 停止变化 1.2s 后发一次，且最快 3s 一次。
+ */
+let settleTimer: number | null = null;
+let lastSettleSent = 0;
+
+function schedulePageSettled(): void {
+    if (picking || rules.length === 0) return;
+    if (settleTimer != null) return;
+    // 冷却期内的变化不要丢掉：推到冷却结束再发，否则"刚加载完页面 + 立刻有新内容"会漏刷新
+    const wait = Math.max(1200, lastSettleSent + 3000 - Date.now());
+    settleTimer = window.setTimeout(() => {
+        settleTimer = null;
+        if (picking || rules.length === 0) return;
+        lastSettleSent = Date.now();
+        try {
+            chrome.runtime.sendMessage({ type: 'adc:pageSettled' }).catch(() => { /* 面板没开 */ });
+        } catch { /* 扩展上下文失效 */ }
+    }, wait);
+}
+
 function watchRemovals(): void {
     if (removeObserver) return;
     const hasWork = () =>
         rules.some((r) => r.enabled && (r.action === 'remove' || isAdvancedPattern(r)));
     removeObserver = new MutationObserver(() => {
+        // 先通知面板（哪怕只是普通规则，命中数也会随页面变化）
+        schedulePageSettled();
         if (!hasWork()) return;
         if (removeTimer != null) return;
         removeTimer = window.setTimeout(() => {

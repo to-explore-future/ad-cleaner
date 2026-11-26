@@ -192,3 +192,26 @@
     自动描述本身已经包含选择器，再重复一行纯属浪费行高。
     `v-if="r.name"` 才显示 `.rule-meta`；单行规则高度 ≤50px。
     → 测试 ㉓
+
+## 0.3.4 新增
+
+42. **规则列表不许定时轮询**
+    原来 `setInterval(loadPage, 2000)`：页面完全不动也在读存储、发 countRules、重渲染。
+    删掉定时器，改成事件驱动：`chrome.tabs.onActivated/onUpdated`（只认当前 tab + complete/url）、
+    `chrome.storage.onChanged`（blockRules/settings）、`visibilitychange`/`focus`（1.5s 内不重复）、
+    内容脚本 `adc:pageSettled`。→ 测试 ㉔（空闲 5.2s countRules 0 次）
+
+43. **页面稳定的通知在冷却期内要延后，不能丢**
+    MutationObserver 通知节流 3s；如果只写 `if (now-last<3000) return`，刚加载完页面
+    紧接着插入内容会整段丢失。改成把定时器推到 `lastSettleSent+3000` 再发。
+    → 测试 ㉔（3 → 4）
+
+44. **页面 DOM 变化只需重算命中数，不要重读存储**
+    `adc:pageSettled` 只调 `refreshCounts()`；规则列表本身只在存储变化时才重新加载。
+    这样页面滚动/懒加载不会带来 storage 读。
+    → 测试 ㉔（countCalls 1 次，存储无变化时列表不动）
+
+45. **后台标签的 hidden 会挡住命中数刷新**
+    面板在后台 tab 时 `document.hidden=true`；页面变化通知会被忽略（省电，合理）。
+    回到面板（visibility/focus）会 loadPage 补上。测试里要先把面板 tab 激活再断言。
+    → 测试 ㉔

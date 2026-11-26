@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import {
-    deleteRule, exportAllRules, importRules, loadRulesFor, loadSettings,
-    newRuleId, normalizeRule, patternLabel, ruleToLabel, saveSettings,
-    setRuleEnabled, upsertRule,
+    deleteRule, ensureRuleUids, exportAllRules, importRules, loadRulesFor, loadSettings,
+    newRuleId, newRuleUid, normalizeRule, patternLabel, ruleDisplayName, ruleToLabel,
+    saveSettings, setRuleEnabled, shortRuleUid, upsertRule,
 } from '@/utils/rules';
 import type { BlockRule, ElementInfo, RulePattern, Settings } from '@/utils/types';
 
@@ -269,6 +269,7 @@ async function loadPage(): Promise<void> {
         pageUrl.value = tab?.url ?? '';
         domain.value = domainOf(pageUrl.value);
         settings.value = await loadSettings();
+        await ensureRuleUids();
         rules.value = canWork.value ? (await loadRulesFor(domain.value)).map(normalizeRule) : [];
         await refreshCounts();
     } catch (e) {
@@ -317,6 +318,7 @@ async function refreshCounts(): Promise<void> {
 // ───────────────────────── 规则操作 ─────────────────────────
 
 async function refreshRules(): Promise<void> {
+    await ensureRuleUids();
     rules.value = canWork.value ? (await loadRulesFor(domain.value)).map(normalizeRule) : [];
     // 规则变了必须重算命中数：否则新规则 id 不在 counts 里，会被"本页"过滤掉
     await refreshCounts();
@@ -335,6 +337,65 @@ async function onDelete(rule: BlockRule): Promise<void> {
     await sendToTab({ type: 'adc:reapply' });
     await refreshRules();
     showToast('已删除');
+}
+
+// ───────────────────────── 规则命名 / UID ─────────────────────────
+
+/** 正在内联改名的规则 id（空 = 没有） */
+const renamingId = ref('');
+const renameDraft = ref('');
+
+/** 点规则名 → 变成输入框；空名字保存后回到自动描述 */
+function beginRename(rule: BlockRule): void {
+    renamingId.value = rule.id;
+    renameDraft.value = rule.name ?? '';
+    void nextTick(() => {
+        const el = document.querySelector<HTMLInputElement>('.rule-name-input');
+        el?.focus();
+        el?.select();
+    });
+}
+
+function cancelRename(): void {
+    renamingId.value = '';
+    renameDraft.value = '';
+}
+
+async function commitRename(rule: BlockRule): Promise<void> {
+    if (renamingId.value !== rule.id) return;
+    const name = renameDraft.value.trim().slice(0, 40);
+    renamingId.value = '';
+    renameDraft.value = '';
+    if (name === (rule.name ?? '')) return;
+    await upsertRule({ ...rule, uid: rule.uid || newRuleUid(), name: name || undefined });
+    await refreshRules();
+    showToast(name ? '已改名' : '已恢复自动描述');
+}
+
+async function copyText(text: string): Promise<boolean> {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch { /* 没焦点/没权限时走兜底 */ }
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok;
+    } catch {
+        return false;
+    }
+}
+
+async function copyRuleUid(rule: BlockRule): Promise<void> {
+    if (!rule.uid) return;
+    const ok = await copyText(rule.uid);
+    showToast(ok ? '已复制 UID：' + rule.uid : '复制失败，请打开编辑查看 UID');
 }
 
 /** 悬浮规则 → 页面上标出它会影响哪些元素 */
@@ -492,6 +553,8 @@ async function startPick(): Promise<void> {
     clearComposition();
     editRootSelector.value = '';
     editAnchorPath.value = '';
+    nameText.value = '';
+    editingUid.value = '';
     // 新一次选择：重新记基线，别把上一次的页面点选当成新的
     centerToken++;
 }
@@ -516,6 +579,8 @@ async function startEdit(rule: BlockRule): Promise<void> {
     clearComposition();
     editRootSelector.value = rule.selector;
     editAnchorPath.value = '';
+    nameText.value = rule.name ?? '';
+    editingUid.value = rule.uid ?? '';
     centerToken++;
 
     const res = await sendToTabOrInject<{ ok: boolean; path?: string }>({
@@ -671,6 +736,10 @@ const outsideChecks = computed(() =>
 const strictMode = ref(false);
 /** 锚点自己的文字约束（偷懒模式：副标签里任意层出现这段字就拦） */
 const anchorText = ref('');
+/** 用户给这条规则起的名字（新建/编辑时填写） */
+const nameText = ref('');
+/** 正在编辑的规则 UID（编辑时展示，方便分享） */
+const editingUid = ref('');
 /** 「+ 加条件」里选的、没有对应树节点的条件（按选择器） */
 const manualConditions = ref<{ selector: string; text?: string; relDepth: number }[]>([]);
 
@@ -1035,6 +1104,8 @@ async function confirmPick(): Promise<void> {
         action: pickAction.value,
         enabled: true,
         label,
+        uid: old?.uid ?? newRuleUid(),
+        ...(nameText.value.trim() ? { name: nameText.value.trim().slice(0, 40) } : {}),
         createdAt: old?.createdAt ?? Date.now(),
         pattern: pattern ?? { selector },
         strict: pattern ? strictMode.value : false,
@@ -1392,14 +1463,42 @@ onUnmounted(() => {
 
                     <div class="rule-main">
                         <div class="rule-label">
-                            {{ ruleToLabel(r) }}
-                            <span v-if="r.strict" class="cond-tag">严格层级</span>
-                            <span v-else-if="r.pattern && r.pattern.children && r.pattern.children.length" class="cond-tag">
-                                {{ r.pattern.children.length }} 个条件
-                            </span>
-                            <span v-if="!r.enabled" class="off-tag">已停用</span>
+                            <template v-if="renamingId === r.id">
+                                <input
+                                    v-model="renameDraft"
+                                    class="rule-name-input"
+                                    maxlength="40"
+                                    :placeholder="ruleToLabel(r)"
+                                    @click.stop
+                                    @keydown.enter.prevent="commitRename(r)"
+                                    @keydown.esc.prevent="cancelRename()"
+                                    @blur="commitRename(r)"
+                                />
+                            </template>
+                            <template v-else>
+                                <button
+                                    type="button"
+                                    class="rule-name"
+                                    :class="{ auto: !r.name }"
+                                    :title="r.name ? '点一下改名' : '给这条规则起个名字（当前为自动描述）'"
+                                    @click.stop="beginRename(r)"
+                                >{{ ruleDisplayName(r) }}</button>
+                                <span v-if="r.strict" class="cond-tag">严格层级</span>
+                                <span v-else-if="r.pattern && r.pattern.children && r.pattern.children.length" class="cond-tag">
+                                    {{ r.pattern.children.length }} 个条件
+                                </span>
+                                <span v-if="!r.enabled" class="off-tag">已停用</span>
+                            </template>
                         </div>
-                        <div v-if="r.selector !== (r.label || '')" class="rule-sel">{{ r.selector }}</div>
+                        <div class="rule-meta">
+                            <span class="rule-sel">{{ r.name ? ruleToLabel(r) : (r.selector !== (r.label || '') ? r.selector : '') }}</span>
+                            <button
+                                type="button"
+                                class="uid-chip"
+                                :title="'复制 UID：' + (r.uid || '')"
+                                @click.stop="copyRuleUid(r)"
+                            >{{ shortRuleUid(r.uid) }}</button>
+                        </div>
                     </div>
 
                     <span
@@ -1602,6 +1701,16 @@ onUnmounted(() => {
                 <!-- 组合标签规则：勾几层 → 一条规则 -->
                 <!-- 统一规则编辑：锚点 + 条件树 + 严格层级开关 -->
                 <div v-if="picking" class="compose">
+                    <div class="compose-name">
+                        <span class="cond-badge name">名</span>
+                        <input
+                            v-model="nameText"
+                            class="compose-name-input"
+                            maxlength="40"
+                            placeholder="给这条规则起个名字（可不填）"
+                        />
+                        <span v-if="editingUid" class="compose-uid" :title="'UID：' + editingUid">{{ shortRuleUid(editingUid) }}</span>
+                    </div>
                     <div class="compose-anchor">
                         <div class="compose-head">
                             <span class="cond-badge anchor">锚</span>
@@ -1951,23 +2060,31 @@ onUnmounted(() => {
 }
 
 .rule {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
     background: #fff;
-    border-radius: 9px;
-    padding: 10px;
-    margin-bottom: 8px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, .06);
+    border: 1px solid #f0f1f3;
+    border-radius: 12px;
+    padding: 11px 12px 10px;
+    margin-bottom: 9px;
+    box-shadow: 0 1px 2px rgba(15, 25, 40, .03), 0 4px 12px rgba(15, 25, 40, .03);
+    transition: border-color .16s ease, box-shadow .16s ease;
     cursor: default;
 }
-.rule.off { opacity: .72; }
+.rule:hover {
+    border-color: #cdeafb;
+    box-shadow: 0 2px 6px rgba(0, 174, 236, .08), 0 8px 20px rgba(15, 25, 40, .04);
+}
+.rule.off { opacity: .62; }
+.rule.off:hover { opacity: .82; }
 
 .check {
     flex: none;
-    width: 20px;
-    height: 20px;
-    border-radius: 5px;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
     border: 1.5px solid #c9cdd4;
     background: #fff;
     color: #fff;
@@ -1975,59 +2092,126 @@ onUnmounted(() => {
     line-height: 1;
     cursor: pointer;
     padding: 0;
+    transition: background .16s ease, border-color .16s ease, box-shadow .16s ease;
 }
-.check.on { background: #00aeec; border-color: #00aeec; }
+.check.on {
+    background: linear-gradient(180deg, #22bdf2, #00aeec);
+    border-color: #00aeec;
+    box-shadow: 0 2px 5px rgba(0, 174, 236, .28);
+}
 
 .rule-main { flex: 1; min-width: 0; }
 .rule-label {
+    display: flex;
+    align-items: center;
+    min-width: 0;
     font-size: 13px;
+}
+.rule-name {
+    min-width: 0;
+    border: 0;
+    background: none;
+    padding: 0;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: #1d2129;
+    text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    cursor: text;
+    border-bottom: 1px dashed transparent;
+}
+.rule-name:hover { border-bottom-color: #c9cdd4; }
+.rule-name.auto { font-weight: 500; color: #2b3340; }
+.rule-name-input {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+    height: 25px;
+    padding: 0 6px;
+    border: 1px solid #00aeec;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: #1d2129;
+    background: #fff;
+}
+.rule-name-input:focus { outline: none; box-shadow: 0 0 0 2px rgba(0, 174, 236, .14); }
+
+.rule-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 3px;
+    min-width: 0;
 }
 .rule-sel {
-    margin-top: 2px;
-    font-size: 11.5px;
-    color: #86909c;
+    flex: 1;
+    min-width: 0;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10.5px;
+    color: #8a93a3;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.uid-chip {
+    flex: none;
+    border: 0;
+    background: #f5f7fa;
+    color: #9aa3b2;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    line-height: 16px;
+    padding: 0 6px;
+    border-radius: 999px;
+    cursor: pointer;
+}
+.uid-chip:hover { background: #e8f7fe; color: #0b6ea8; }
 
 .cond-tag {
-    margin-left: 6px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: #e8f4fd;
+    flex: none;
+    margin-left: 5px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    border: 1px solid #d3eefb;
+    background: #eaf7fe;
     color: #0b6ea8;
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 400;
 }
 
 .off-tag {
-    margin-left: 6px;
-    padding: 1px 5px;
-    border-radius: 4px;
-    background: #f2f3f5;
+    flex: none;
+    margin-left: 5px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    border: 1px solid #e5e6eb;
+    background: #f7f8fa;
     color: #86909c;
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 400;
 }
 
 .count {
     flex: none;
-    min-width: 22px;
-    height: 20px;
-    padding: 0 6px;
-    border-radius: 10px;
-    background: #f2f3f5;
+    min-width: 26px;
+    height: 22px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: #f4f5f7;
     color: #86909c;
     font-size: 11px;
-    line-height: 20px;
+    font-weight: 600;
+    line-height: 22px;
     text-align: center;
 }
-.count.multi { background: #fff7e8; color: #ff7d00; }
-.count.zero { background: #ffece8; color: #f53f3f; }
+.count.multi { background: #fff4e6; color: #d25f00; }
+.count.zero { background: #ffece8; color: #d93026; }
 
 .icon {
     flex: none;
@@ -2036,15 +2220,16 @@ onUnmounted(() => {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border: 1px solid #e5e6eb;
-    border-radius: 7px;
-    background: #fff;
-    color: #4e5969;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: #f7f8fa;
+    color: #5c6573;
     cursor: pointer;
     padding: 0;
+    transition: background .16s ease, color .16s ease, border-color .16s ease;
 }
-.icon:hover { border-color: #00aeec; color: #00aeec; }
-.icon.danger:hover { border-color: #f53f3f; color: #f53f3f; }
+.icon:hover { background: #e8f7fe; border-color: #b9e7fb; color: #00a3dd; }
+.icon.danger:hover { background: #fff0ed; border-color: #ffd2c9; color: #e5482f; }
 
 /* ── 底部按钮 ── */
 .foot {
@@ -2207,6 +2392,36 @@ onUnmounted(() => {
     margin-bottom: 6px;
     background: #f7f8fa;
     border-radius: 8px;
+}
+.compose-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+.cond-badge.name { background: #f0eeff; color: #5b4bc4; }
+.compose-name-input {
+    flex: 1;
+    min-width: 0;
+    height: 26px;
+    padding: 0 7px;
+    border: 1px solid #e5e6eb;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 11.5px;
+    color: #1f2329;
+    background: #fff;
+}
+.compose-name-input:focus {
+    outline: none;
+    border-color: #00aeec;
+    box-shadow: 0 0 0 2px rgba(0, 174, 236, .12);
+}
+.compose-uid {
+    flex: none;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    color: #9aa3b2;
 }
 .compose-anchor {
     display: flex;

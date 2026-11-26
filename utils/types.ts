@@ -53,6 +53,13 @@ export interface BlockRule {
     enabled: boolean;
     /** 给人看的短描述，例如 `div.ad-box` */
     label: string;
+    /**
+     * 全局唯一 id（跨用户 / 跨电脑），用于分享和统计。
+     * 老规则没有时，面板加载会自动补齐并写回。
+     */
+    uid?: string;
+    /** 用户起的名字；空则显示自动描述 */
+    name?: string;
     /** 统一规则模型（新规则一定有；旧规则加载时自动迁移） */
     pattern?: RulePattern;
     /** 严格层级：true = children 按 relDepth 精确匹配；false/缺省 = 任意层 */

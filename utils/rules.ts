@@ -103,12 +103,13 @@ async function writeRulesFor(domain: string, list: BlockRule[]): Promise<void> {
     await chrome.storage.local.set({ [RULES_KEY]: all });
 }
 
-/** 新增或更新一条规则（按 id 覆盖）。 */
+/** 新增或更新一条规则（按 id 覆盖；缺 uid 时自动补一个）。 */
 export async function upsertRule(rule: BlockRule): Promise<void> {
     const list = await loadRulesFor(rule.domain);
     const i = list.findIndex((r) => r.id === rule.id);
-    if (i >= 0) list[i] = rule;
-    else list.push(rule);
+    const next = { ...rule, uid: rule.uid || newRuleUid() };
+    if (i >= 0) list[i] = next;
+    else list.push(next);
     await writeRulesFor(rule.domain, list);
 }
 
@@ -160,9 +161,65 @@ export function buildHideCss(rules: BlockRule[], excludeSelector?: string): stri
     return sels.map((s) => `${s}{display:none !important}`).join('\n');
 }
 
-/** 生成一个不重复的规则 id。 */
+/** 生成一个不重复的规则 id（本机存储用）。 */
 export function newRuleId(): string {
     return `r_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * 生成全局唯一 id。
+ *
+ * ⚠️ 这个不是本机 id：分享规则、以后做"多少人在用"都靠它，所以必须跨电脑不撞。
+ *    优先 crypto.randomUUID（122 位随机），拿不到才退回时间戳 + 两段随机。
+ */
+export function newRuleUid(): string {
+    try {
+        const c = globalThis.crypto;
+        if (c && typeof c.randomUUID === 'function') {
+            return `adc_${c.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+        }
+    } catch { /* 老环境没有 crypto，走兜底 */ }
+    const rand = () => Math.random().toString(36).slice(2, 10);
+    return `adc_${Date.now().toString(36)}${rand()}${rand()}`.slice(0, 28);
+}
+
+/**
+ * 老规则没有 uid → 补齐并写回。
+ *
+ * 只在面板加载时调用；写完以后 uid 就固定了，刷新/导出/导入都不会变。
+ */
+let ensureUidPromise: Promise<void> | null = null;
+
+export function ensureRuleUids(): Promise<void> {
+    // 面板每 2s 轮询一次，多个调用叠在一起会给同一条规则生成不同 uid
+    if (ensureUidPromise) return ensureUidPromise;
+    ensureUidPromise = (async () => {
+        const all = await loadAllRules();
+        let changed = false;
+        for (const list of Object.values(all)) {
+            for (const r of list) {
+                if (!r.uid) {
+                    r.uid = newRuleUid();
+                    changed = true;
+                }
+            }
+        }
+        if (changed) {
+            try { await chrome.storage.local.set({ [RULES_KEY]: all }); } catch { /* 写失败下次再补 */ }
+        }
+    })().finally(() => { ensureUidPromise = null; });
+    return ensureUidPromise;
+}
+
+/** UID 的短展示（列表里只露后 8 位，完整值在 tooltip / 复制里）。 */
+export function shortRuleUid(uid?: string): string {
+    return uid ? `#${uid.slice(-8)}` : '#—';
+}
+
+/** 规则标题：用户起的名字优先，否则自动描述。 */
+export function ruleDisplayName(rule: BlockRule): string {
+    const name = rule.name?.trim();
+    return name || ruleToLabel(rule);
 }
 
 // ───────────────────────── 导入 / 导出 ─────────────────────────
@@ -257,6 +314,20 @@ function sanitizePattern(raw: unknown, depth = 0): RulePattern | undefined {
     };
 }
 
+/** 校验 uid：只允许字母数字下划线短横线；不合法就当没有（会自动补新号）。 */
+function sanitizeUid(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const s = raw.trim();
+    return /^[A-Za-z0-9_-]{4,80}$/.test(s) ? s : undefined;
+}
+
+/** 校验用户起的名字：去掉首尾空白，最长 40 字。 */
+function sanitizeName(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const s = raw.trim().slice(0, 40);
+    return s || undefined;
+}
+
 /**
  * 合并时判断"是不是同一条规则"。
  *
@@ -298,6 +369,8 @@ export async function importRules(text: string): Promise<{ added: number; update
             if (!selector) continue;
             const condition = sanitizeCondition(r.condition);
             const parts = sanitizeParts(r.parts);
+            const uid = sanitizeUid(r.uid) ?? newRuleUid();
+            const name = sanitizeName(r.name);
             const base: BlockRule = {
                 id: r.id || newRuleId(),
                 domain,
@@ -306,6 +379,8 @@ export async function importRules(text: string): Promise<{ added: number; update
                 enabled: r.enabled !== false,
                 label: r.label || selector,
                 createdAt: r.createdAt || Date.now(),
+                uid,
+                ...(name ? { name } : {}),
                 ...(condition ? { condition } : {}),
                 ...(parts ? { parts } : {}),
                 ...(pattern ? { pattern } : {}),
@@ -314,9 +389,17 @@ export async function importRules(text: string): Promise<{ added: number; update
             // 旧格式（condition/parts）在这里统一迁移成 pattern
             const rule = normalizeRule(base);
             const key = ruleIdentity(rule);
-            const i = existing.findIndex((x) => ruleIdentity(x) === key);
+            // 先按 uid 认：分享出去再导回来，同一条规则要更新而不是复制一份
+            let i = existing.findIndex((x) => x.uid && x.uid === uid);
+            // 老文件没有 uid（或 uid 对不上）→ 退回按条件树身份认
+            if (i < 0) i = existing.findIndex((x) => ruleIdentity(x) === key);
             if (i >= 0) {
-                existing[i] = rule;
+                existing[i] = {
+                    ...rule,
+                    // 同一条规则不换本地 uid；老规则缺 uid 时才用导入的
+                    uid: existing[i].uid ?? uid,
+                    name: rule.name ?? existing[i].name,
+                };
                 updated++;
             } else {
                 existing.push(rule);

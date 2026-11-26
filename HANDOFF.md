@@ -21,7 +21,7 @@ Chrome → `chrome://extensions` → 开发者模式 → 加载已解压 → 选
 
 ```bash
 node scripts/server.cjs &     # 本地测试页 :8941
-node scripts/verify-real.cjs  # 生产路径端到端，132 项
+node scripts/verify-real.cjs  # 生产路径端到端，150 项
 node scripts/verify.cjs       # 完整套件，25 项
 ```
 
@@ -47,7 +47,7 @@ scripts/fixture/index.html            测试页
 - 统一规则模型：锚点 + 条件树（锚点文字偷懒模式 / 勾选条件 / 严格层级 / 条件嵌套与文字）
 - 规则列表：本页/本网站筛选、开关、编辑、删除、命中数、导入导出
 - 面板可弹出成独立窗口（⧉）
-- 157 项自动化测试（132 + 25）
+- 175 项自动化测试（150 + 25）
 
 ## 已知问题（**未修完**）
 
@@ -80,6 +80,12 @@ scripts/fixture/index.html            测试页
 > 不再参与规则，修掉"勾选锚点 + 蓝色定位更深一层 → 误报勾选在锚点外面"。
 > 点条件区的选择器或「定位」按钮，把该节点滚到树正中（只滚不改选中）；
 > 编辑时根节点也勾上，`editAnchorPath` 保住原选择器。对应测试 ⑫ / ⑫c / ⑪b。
+>
+> 0.3.2 已加：规则 name + 全局 uid。uid 用 `crypto.randomUUID` 取 20 位，
+> 老规则面板加载时补齐并写回（`ensureRuleUids` 串行化，避免并发生成不同号）；
+> 导出/导入保留 name/uid，导入先按 uid 认同一条、再按条件树身份兜底；
+> 列表支持点标题内联改名、显示/复制 UID 短码。规则列表排版重新做过。
+> 对应测试 ㉒ / ㉓。
 
 ## 关键约定（改之前必读）
 

@@ -150,3 +150,24 @@
     `finalSelector` 是蓝行的实测选择器；锚点若是另一个勾选行，必须用
     `shortSelector(anchor)`。编辑规则且锚点仍是原来的根时才复用 `editRootSelector`。
     → 测试 ⑫ / ⑫c
+
+## 0.3.2 新增
+
+34. **老规则补 UID 必须串行且幂等**
+    面板每 2s 轮询 loadPage；两次 ensure 并发会给同一条规则生成不同的 uid。
+    用模块级 promise 串行化，只在缺 uid 时写回。补完以后 UID 不能变。
+    ⚠️ 后台标签的定时器会被 Chrome 降频到 1 分钟一次，测试里别赌 2s 轮询，
+    重新打开面板（onMounted → loadPage）再断言。→ 测试 ㉓
+
+35. **导入先按 UID 认，再按条件树身份兜底**
+    分享出去再导回来必须更新原规则而不是复制一份；同 UID 重复导入总数不变。
+    按身份合并时保留本地 uid；只有本地缺 uid 才用导入的。
+    → 测试 ㉓
+
+36. **名字只是显示层，不许影响匹配**
+    `name` 最长 40 字，可空；空时回退 `ruleToLabel`。改名只改 name 字段，
+    uid/pattern/strict 一个都不许动；清空名字恢复自动描述。→ 测试 ㉒
+
+37. **UID 不能放进规则身份**
+    `ruleIdentity` 仍只看 pattern + strict；uid 用于分享/统计，不参与匹配，
+    也不能用它去判断"两条规则是否等价"。→ 测试 ⑧b / ㉓

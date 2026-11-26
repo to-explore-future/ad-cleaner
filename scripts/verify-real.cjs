@@ -1445,6 +1445,163 @@ async function importRulesFile(panel, filePath) {
             `chk ${btnMulti.chkMid} / arrow ${btnMulti.arrowMid} / line ${btnMulti.lineMid}`);
     }
 
+    // ═══════════ ㉒ 规则命名 + 全局 UID ═══════════
+    await cancelPick(panel);
+    await sleep(700);
+    await page.send('Page.reload');
+    await sleep(2000);
+    await ev(panel, `chrome.storage.local.set({ blockRules: {} }).then(()=>'ok')`);
+    await sleep(1200);
+    await ev(panel, `document.querySelector('.primary')?.click()`);
+    await sleep(1200);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 150, y: 150, button: 'none' });
+    await sleep(800);
+    await ev(panel, `(() => {
+        const rows = [...document.querySelectorAll('.tree .row')];
+        const r = rows.find((x) => (x.querySelector('.html')?.textContent ?? '').includes('ad-box'));
+        r?.querySelector('.name')?.click();
+        return !!r;
+    })()`);
+    await sleep(800);
+
+    // 新建时直接命名
+    await setInput(panel, '.compose-name-input', '首页大广告框');
+    await sleep(300);
+    await savePick(panel);
+    await sleep(2600);
+
+    const nameSaved = JSON.parse(await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        const list = Object.values(g.blockRules || {}).flat();
+        return JSON.stringify(list.map((r) => ({ name: r.name ?? '', uid: r.uid ?? '' })));
+    })()`));
+    console.log('   · 命名规则:', JSON.stringify(nameSaved));
+    check('㉒ 新建时能直接命名', nameSaved[0]?.name === '首页大广告框', JSON.stringify(nameSaved[0]));
+    check('㉒ 新规则自动带全局 UID', /^adc_[A-Za-z0-9]{8,}$/.test(nameSaved[0]?.uid || ''), nameSaved[0]?.uid || '');
+
+    const rowText22 = await ev(panel, `document.querySelector('.rule')?.innerText.replace(/\\s+/g,' ').trim() ?? ''`);
+    check('㉒ 列表标题显示名字', /首页大广告框/.test(rowText22), rowText22);
+    check('㉒ 列表显示 UID 短码', rowText22.includes('#' + (nameSaved[0]?.uid || '').slice(-8)), rowText22);
+    check('㉒ 列表仍显示自动描述', /div\.ad-box/.test(rowText22), rowText22);
+
+    // 点名字 → 内联改名
+    await ev(panel, `document.querySelector('.rule .rule-name')?.click()`);
+    await sleep(400);
+    const renameShown = await ev(panel, `!!document.querySelector('.rule-name-input')`);
+    check('㉒ 点名字出现内联输入框', renameShown === true);
+    await setInput(panel, '.rule-name-input', '首页顶部广告');
+    await ev(panel, `(() => {
+        const i = document.querySelector('.rule-name-input');
+        i?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        return true;
+    })()`);
+    await sleep(2400);
+    const renamed22 = JSON.parse(await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        const r = Object.values(g.blockRules || {}).flat()[0] || {};
+        return JSON.stringify({ name: r.name ?? '', uid: r.uid ?? '' });
+    })()`));
+    check('㉒ 改名写回存储', renamed22.name === '首页顶部广告', renamed22.name);
+    check('㉒ 改名不换 UID', renamed22.uid === nameSaved[0]?.uid, `${renamed22.uid} vs ${nameSaved[0]?.uid}`);
+
+    // 编辑时名字回填 + 显示 UID
+    await ev(panel, `document.querySelector('.rule .icon[title="编辑"]')?.click()`);
+    await sleep(2600);
+    const editNameVal = await ev(panel, `document.querySelector('.compose-name-input')?.value ?? ''`);
+    const editUidText = await ev(panel, `document.querySelector('.compose-uid')?.textContent ?? ''`);
+    check('㉒ 编辑时名字回填', editNameVal === '首页顶部广告', editNameVal);
+    check('㉒ 编辑时显示 UID 短码', editUidText.includes((renamed22.uid || '').slice(-8)), editUidText);
+    await cancelPick(panel);
+    await sleep(800);
+
+    // ═══════════ ㉓ 老规则补 UID / 导入导出保留命名 ═══════════
+    await page.send('Page.reload');
+    await sleep(1800);
+    await ev(panel, `chrome.storage.local.set({ blockRules: { '127.0.0.1': [
+        { id: 'legacy-1', domain: '127.0.0.1', selector: '.dup', action: 'hide', enabled: true, label: 'div.dup', createdAt: 1 },
+        { id: 'legacy-2', domain: '127.0.0.1', selector: '.icon-box', action: 'hide', enabled: true, label: 'div.icon-box', createdAt: 2 }
+    ] } }).then(()=>'ok')`);
+    // 后台标签的定时器会被 Chrome 降频；重新打开面板走一次 onMounted → loadPage 才稳定
+    await panel.send('Page.reload');
+    await sleep(1800);
+    // 等它把老规则补齐（最多 8s）
+    let backfilled = [];
+    for (let i = 0; i < 16; i++) {
+        await sleep(500);
+        backfilled = JSON.parse(await ev(panel, `(async () => {
+            const g = await chrome.storage.local.get('blockRules');
+            return JSON.stringify((g.blockRules['127.0.0.1'] || []).map((r) => ({ id: r.id, uid: r.uid ?? '' })));
+        })()`));
+        if (backfilled.length === 2 && backfilled.every((r) => r.uid)) break;
+    }
+    console.log('   · 老规则补 UID:', JSON.stringify(backfilled));
+    check('㉓ 老规则自动补 UID', backfilled.length === 2 && backfilled.every((r) => /^adc_[A-Za-z0-9]{8,}$/.test(r.uid)), JSON.stringify(backfilled));
+    check('㉓ 两条规则 UID 互不相同', backfilled[0]?.uid !== backfilled[1]?.uid, JSON.stringify(backfilled));
+    const uidBefore = backfilled.map((r) => r.uid).join('|');
+    await sleep(2600);
+    const uidAfter = (JSON.parse(await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        return JSON.stringify((g.blockRules['127.0.0.1'] || []).map((r) => r.uid ?? ''));
+    })()`)) || []).join('|');
+    check('㉓ UID 补完以后保持稳定', uidAfter === uidBefore, `${uidBefore} → ${uidAfter}`);
+
+    // 导入一条带 name + uid 的分享规则
+    const shareFile = path.join(os.tmpdir(), 'adc-share-rule.json');
+    const shareRule = {
+        id: 'shared-1', domain: '127.0.0.1', selector: '.dup', action: 'hide',
+        enabled: true, label: 'div.dup', createdAt: 3,
+        uid: 'adc_shared00000000000001', name: '共享的推广卡',
+        pattern: { selector: '.dup', text: '推广' }, strict: false,
+    };
+    fs.writeFileSync(shareFile, JSON.stringify({ format: 1, app: '广告拦截助手', version: '0.4.0', exportedAt: Date.now(), rules: { '127.0.0.1': [shareRule] } }, null, 2));
+    await importRulesFile(panel, shareFile);
+    await sleep(2000);
+    const importedShare = JSON.parse(await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        const list = g.blockRules['127.0.0.1'] || [];
+        const r = list.find((x) => x.uid === 'adc_shared00000000000001') || {};
+        return JSON.stringify({ total: list.length, name: r.name ?? '', uid: r.uid ?? '' });
+    })()`));
+    check('㉓ 导入保留分享规则的 UID', importedShare.uid === 'adc_shared00000000000001', JSON.stringify(importedShare));
+    check('㉓ 导入保留分享规则的名字', importedShare.name === '共享的推广卡', JSON.stringify(importedShare));
+
+    // 同 UID 再导入一次（改了名字）→ 更新，不许重复
+    shareRule.name = '共享的推广卡（已改名）';
+    fs.writeFileSync(shareFile, JSON.stringify({ format: 1, app: '广告拦截助手', version: '0.4.0', exportedAt: Date.now(), rules: { '127.0.0.1': [shareRule] } }, null, 2));
+    await importRulesFile(panel, shareFile);
+    await sleep(2000);
+    const reimported = JSON.parse(await ev(panel, `(async () => {
+        const g = await chrome.storage.local.get('blockRules');
+        const list = g.blockRules['127.0.0.1'] || [];
+        const r = list.find((x) => x.uid === 'adc_shared00000000000001') || {};
+        return JSON.stringify({ total: list.length, name: r.name ?? '' });
+    })()`));
+    check('㉓ 同 UID 重复导入不会多一条', reimported.total === 3, `${reimported.total} 条`);
+    check('㉓ 同 UID 导入会更新名字', reimported.name === '共享的推广卡（已改名）', reimported.name);
+
+    // 导出内容必须带 name / uid
+    const exportedText = await ev(panel, `(async () => {
+        let captured = '';
+        const orig = URL.createObjectURL;
+        URL.createObjectURL = (blob) => {
+            try { blob.text().then((t) => { captured = t; }); } catch { /* ignore */ }
+            return orig.call(URL, blob);
+        };
+        const b = [...document.querySelectorAll('.rf-link')].find((x) => x.textContent.trim() === '导出');
+        b && b.click();
+        await new Promise((r) => setTimeout(r, 600));
+        URL.createObjectURL = orig;
+        return captured;
+    })()`);
+    let exportedOk = false;
+    try {
+        const parsed = JSON.parse(exportedText);
+        const list = parsed.rules?.['127.0.0.1'] || [];
+        const r = list.find((x) => x.uid === 'adc_shared00000000000001');
+        exportedOk = !!r && r.name === '共享的推广卡（已改名）';
+    } catch { /* 导出被下载策略拦住时，至少不误报 */ }
+    check('㉓ 导出文件带 name / uid', exportedOk === true, String(exportedText).slice(0, 120));
+
     console.log('\n========== 汇总 ==========');
     const failed = checks.filter((c) => !c.ok);
     console.log(`${checks.length - failed.length}/${checks.length} 项通过`);
